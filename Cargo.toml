@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["app", "app-slint", "core", "server"]
+members = ["app", "core", "server"]
 
 [workspace.package]
 version = "0.1.0"
