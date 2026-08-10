@@ -1,0 +1,167 @@
+:root {
+  --bg: #fbfbfa;
+  --fg: #1c1c1a;
+  --muted: #77776f;
+  --line: #dedcd5;
+  --accent: #2f7d4f;
+  --chip: #eceae3;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16161a;
+    --fg: #ecebe6;
+    --muted: #8f8f88;
+    --line: #2d2d33;
+    --accent: #4faa74;
+    --chip: #26262c;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0 auto;
+  padding: 0 1rem 3rem;
+  max-width: 34rem;
+  background: var(--bg);
+  color: var(--fg);
+  font: 1rem/1.5 system-ui, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+}
+
+header {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.75rem 0;
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+}
+
+h1 {
+  margin: 0 auto 0 0;
+  font-size: 1.25rem;
+  letter-spacing: -0.01em;
+}
+
+button {
+  min-height: 2.5rem;
+  padding: 0 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+input {
+  width: 100%;
+  min-height: 2.5rem;
+  padding: 0 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+
+.add {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.75rem 0;
+}
+
+.settings {
+  display: grid;
+  gap: 0.75rem;
+  padding: 1rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings label {
+  display: grid;
+  gap: 0.25rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.device {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.items {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.item {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.tick {
+  width: 2.5rem;
+  padding: 0;
+  color: var(--accent);
+  font-size: 1.1rem;
+}
+
+.name {
+  flex: 1 1 6rem;
+}
+
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.tag,
+.add-tag {
+  min-height: 1.9rem;
+  padding: 0 0.5rem;
+  border-radius: 999px;
+  background: var(--chip);
+  font-size: 0.8rem;
+}
+
+.add-tag {
+  background: transparent;
+  color: var(--muted);
+}
+
+.tag-input {
+  width: 5rem;
+  min-height: 1.9rem;
+  font-size: 0.8rem;
+}
+
+.empty,
+.status {
+  color: var(--muted);
+  font-size: 0.9rem;
+}

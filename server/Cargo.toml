@@ -1,0 +1,22 @@
+[package]
+name = "kauf-server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+axum = "0.8"
+clap = { version = "4", features = ["derive"] }
+getrandom = "0.3"
+hex = "0.4"
+kauf-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+subtle = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tower-http = { version = "0.6", features = ["cors", "fs"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
