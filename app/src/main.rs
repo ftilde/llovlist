@@ -88,11 +88,13 @@ fn start_sync(
     mut session: Signal<Session>,
     settings: Signal<Settings>,
     mut status: Signal<String>,
+    mut error: Signal<String>,
 ) {
     let settings = settings.read().clone();
     let local = session.read().list().clone();
     spawn(async move {
         status.set("syncing…".to_owned());
+        error.set(String::new());
         match sync::exchange(&settings.server, &settings.list, &settings.token, local).await {
             Ok(merged) => {
                 session.write().merge(merged);
@@ -101,7 +103,10 @@ fn start_sync(
                 let plural = if count == 1 { "" } else { "s" };
                 status.set(format!("synced, {count} item{plural}"));
             }
-            Err(error) => status.set(error),
+            Err(reason) => {
+                status.set("sync failed".to_owned());
+                error.set(reason);
+            }
         }
     });
 }
@@ -111,19 +116,21 @@ fn App() -> Element {
     let settings = use_signal(Settings::load);
     let session = use_signal(|| Session::new(settings.read().device, load_list()));
     let status = use_signal(String::new);
+    let mut error = use_signal(String::new);
     let mut draft = use_signal(String::new);
     let mut settings_open = use_signal(|| false);
 
     let items = session.read().list().items();
     let can_undo = session.read().can_undo();
     let message = status();
+    let failure = error();
 
     rsx! {
         document::Style { {CSS} }
         header {
             h1 { "1kauf" }
             button { disabled: !can_undo, onclick: move |_| undo(session), "undo" }
-            button { onclick: move |_| start_sync(session, settings, status), "sync" }
+            button { onclick: move |_| start_sync(session, settings, status, error), "sync" }
             button {
                 class: if settings_open() { "active" },
                 onclick: move |_| settings_open.toggle(),
@@ -161,6 +168,16 @@ fn App() -> Element {
 
         if !message.is_empty() {
             p { class: "status", "{message}" }
+        }
+
+        if !failure.is_empty() {
+            div { class: "overlay",
+                div { class: "card",
+                    h2 { "sync failed" }
+                    p { "{failure}" }
+                    button { onclick: move |_| error.set(String::new()), "ok" }
+                }
+            }
         }
     }
 }

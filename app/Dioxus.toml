@@ -1,8 +1,15 @@
 [application]
 name = "1kauf"
+# dx reads the manifest minSdk and the NDK API level from two different keys with
+# two different defaults (24 and 28); pinning both stops the native library from
+# requiring a newer Android than the manifest admits to.
+android_min_sdk_version = 28
 
 [web.app]
 title = "1kauf"
 
 [bundle]
 identifier = "com.ftilde.kauf"
+
+[android]
+min_sdk = 28
