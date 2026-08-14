@@ -7,7 +7,9 @@ mod platform {
     }
 
     pub fn default_server() -> String {
-        web_sys::window().and_then(|window| window.location().origin().ok()).unwrap_or_default()
+        web_sys::window()
+            .and_then(|window| window.location().origin().ok())
+            .unwrap_or_default()
     }
 
     pub fn load(key: &str) -> Option<String> {
@@ -70,12 +72,17 @@ mod platform {
             .call_method(&files, "getAbsolutePath", "()Ljava/lang/String;", &[])
             .and_then(|value| value.l())
             .expect("File.getAbsolutePath");
-        let path: String = env.get_string(&JString::from(path)).expect("path is a string").into();
+        let path: String = env
+            .get_string(&JString::from(path))
+            .expect("path is a string")
+            .into();
         PathBuf::from(path)
     }
 
     #[cfg(not(target_os = "android"))]
     fn directory() -> PathBuf {
-        dirs::data_dir().unwrap_or_else(std::env::temp_dir).join("1kauf")
+        dirs::data_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("1kauf")
     }
 }

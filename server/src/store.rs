@@ -51,7 +51,10 @@ pub struct Store {
 impl Store {
     pub fn open(dir: PathBuf) -> io::Result<Self> {
         fs::create_dir_all(&dir)?;
-        Ok(Self { dir, lists: Mutex::default() })
+        Ok(Self {
+            dir,
+            lists: Mutex::default(),
+        })
     }
 
     pub fn sync(&self, id: &ListId, incoming: ShoppingList) -> io::Result<ShoppingList> {
@@ -82,7 +85,10 @@ impl Store {
     fn write(&self, id: &ListId, list: &ShoppingList) -> io::Result<()> {
         let path = self.path(id);
         let temporary = path.with_extension("json.new");
-        fs::write(&temporary, serde_json::to_vec(list).map_err(io::Error::other)?)?;
+        fs::write(
+            &temporary,
+            serde_json::to_vec(list).map_err(io::Error::other)?,
+        )?;
         fs::rename(temporary, path)
     }
 }
@@ -95,13 +101,24 @@ mod tests {
 
     fn list_with(device: u64, item: &str) -> ShoppingList {
         let mut list = ShoppingList::default();
-        list.edit(DeviceId::new(device), Edit::add_item(ItemName::new(item).unwrap()));
+        list.edit(
+            DeviceId::new(device),
+            Edit::add_item(ItemName::new(item).unwrap()),
+        );
         list
     }
 
     #[test]
     fn ids_that_could_escape_the_state_directory_are_rejected() {
-        for raw in ["", "..", "../secrets", "a/b", "a.json", "hä", &"x".repeat(65)] {
+        for raw in [
+            "",
+            "..",
+            "../secrets",
+            "a/b",
+            "a.json",
+            "hä",
+            &"x".repeat(65),
+        ] {
             assert_eq!(ListId::new(raw), Err(InvalidListId), "accepted {raw:?}");
         }
         assert!(ListId::new("family_list-2").is_ok());
@@ -112,7 +129,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let id = ListId::new("home").unwrap();
 
-        Store::open(dir.path().to_owned()).unwrap().sync(&id, list_with(1, "Milch")).unwrap();
+        Store::open(dir.path().to_owned())
+            .unwrap()
+            .sync(&id, list_with(1, "Milch"))
+            .unwrap();
         let restarted = Store::open(dir.path().to_owned()).unwrap();
         let merged = restarted.sync(&id, ShoppingList::default()).unwrap();
 

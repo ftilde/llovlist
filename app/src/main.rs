@@ -16,8 +16,12 @@ fn main() {
     {
         use dioxus::desktop::{Config, WindowBuilder};
         // GTK ignores xdg-decoration, so a tiling WM cannot remove the title bar itself.
-        let window = WindowBuilder::new().with_decorations(false).with_title("1kauf");
-        dioxus::LaunchBuilder::desktop().with_cfg(Config::new().with_window(window)).launch(App);
+        let window = WindowBuilder::new()
+            .with_decorations(false)
+            .with_title("1kauf");
+        dioxus::LaunchBuilder::desktop()
+            .with_cfg(Config::new().with_window(window))
+            .launch(App);
     }
     #[cfg(not(feature = "desktop"))]
     dioxus::launch(App);
@@ -33,14 +37,14 @@ struct Settings {
 
 impl Settings {
     fn load() -> Self {
-        storage::load(SETTINGS_KEY).and_then(|json| serde_json::from_str(&json).ok()).unwrap_or(
-            Self {
+        storage::load(SETTINGS_KEY)
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or(Self {
                 server: storage::default_server(),
                 list: "home".to_owned(),
                 token: String::new(),
                 device: DeviceId::new(storage::random_u64()),
-            },
-        )
+            })
     }
 
     fn save(&self) {
@@ -51,7 +55,9 @@ impl Settings {
 }
 
 fn load_list() -> ShoppingList {
-    storage::load(LIST_KEY).and_then(|json| serde_json::from_str(&json).ok()).unwrap_or_default()
+    storage::load(LIST_KEY)
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default()
 }
 
 fn store(session: Signal<Session>) {

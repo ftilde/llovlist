@@ -96,7 +96,13 @@ mod tests {
         let hash = token.hash();
 
         assert!(hash.accepts(&token.to_string()));
-        for presented in ["", "not hex", "zz", &Token::generate().to_string(), &"a".repeat(1000)] {
+        for presented in [
+            "",
+            "not hex",
+            "zz",
+            &Token::generate().to_string(),
+            &"a".repeat(1000),
+        ] {
             assert!(!hash.accepts(presented), "accepted {presented:?}");
         }
     }

@@ -47,7 +47,12 @@ fn a_concurrent_add_beats_a_tick_off() {
     let mut bob = ShoppingList::default();
     bob.merge(alice.clone());
 
-    alice.edit(ALICE, Edit::RemoveItem { name: name("Milch") });
+    alice.edit(
+        ALICE,
+        Edit::RemoveItem {
+            name: name("Milch"),
+        },
+    );
     bob.edit(BOB, Edit::add_item(name("Milch")));
     alice.merge(bob);
 
@@ -58,12 +63,29 @@ fn a_concurrent_add_beats_a_tick_off() {
 fn a_tick_off_wipes_the_tags_it_had_seen_but_not_concurrent_ones() {
     let mut alice = ShoppingList::default();
     alice.edit(ALICE, Edit::add_item(name("Milch")));
-    alice.edit(ALICE, Edit::AddTag { name: name("Milch"), tag: tag("2x") });
+    alice.edit(
+        ALICE,
+        Edit::AddTag {
+            name: name("Milch"),
+            tag: tag("2x"),
+        },
+    );
     let mut bob = ShoppingList::default();
     bob.merge(alice.clone());
 
-    alice.edit(ALICE, Edit::RemoveItem { name: name("Milch") });
-    bob.edit(BOB, Edit::AddTag { name: name("Milch"), tag: tag("3x") });
+    alice.edit(
+        ALICE,
+        Edit::RemoveItem {
+            name: name("Milch"),
+        },
+    );
+    bob.edit(
+        BOB,
+        Edit::AddTag {
+            name: name("Milch"),
+            tag: tag("3x"),
+        },
+    );
     alice.merge(bob);
 
     assert_eq!(alice.items(), vec![(name("Milch"), tags(&["3x"]))]);
@@ -73,12 +95,30 @@ fn a_tick_off_wipes_the_tags_it_had_seen_but_not_concurrent_ones() {
 fn a_tag_removed_while_the_other_device_adds_it_survives() {
     let mut alice = ShoppingList::default();
     alice.edit(ALICE, Edit::add_item(name("Milch")));
-    alice.edit(ALICE, Edit::AddTag { name: name("Milch"), tag: tag("2x") });
+    alice.edit(
+        ALICE,
+        Edit::AddTag {
+            name: name("Milch"),
+            tag: tag("2x"),
+        },
+    );
     let mut bob = ShoppingList::default();
     bob.merge(alice.clone());
 
-    alice.edit(ALICE, Edit::RemoveTag { name: name("Milch"), tag: tag("2x") });
-    bob.edit(BOB, Edit::AddTag { name: name("Milch"), tag: tag("2x") });
+    alice.edit(
+        ALICE,
+        Edit::RemoveTag {
+            name: name("Milch"),
+            tag: tag("2x"),
+        },
+    );
+    bob.edit(
+        BOB,
+        Edit::AddTag {
+            name: name("Milch"),
+            tag: tag("2x"),
+        },
+    );
     alice.merge(bob);
 
     assert_eq!(alice.tags(&name("Milch")), tags(&["2x"]));
@@ -91,8 +131,20 @@ fn concurrent_tag_edits_keep_both_values() {
     let mut bob = ShoppingList::default();
     bob.merge(alice.clone());
 
-    alice.edit(ALICE, Edit::AddTag { name: name("Milch"), tag: tag("2x") });
-    bob.edit(BOB, Edit::AddTag { name: name("Milch"), tag: tag("3x") });
+    alice.edit(
+        ALICE,
+        Edit::AddTag {
+            name: name("Milch"),
+            tag: tag("2x"),
+        },
+    );
+    bob.edit(
+        BOB,
+        Edit::AddTag {
+            name: name("Milch"),
+            tag: tag("3x"),
+        },
+    );
     alice.merge(bob);
 
     assert_eq!(alice.tags(&name("Milch")), tags(&["2x", "3x"]));
@@ -102,7 +154,13 @@ fn concurrent_tag_edits_keep_both_values() {
 fn tagging_an_item_nobody_added_creates_it() {
     let mut alice = ShoppingList::default();
 
-    alice.edit(ALICE, Edit::AddTag { name: name("Milch"), tag: tag("2x") });
+    alice.edit(
+        ALICE,
+        Edit::AddTag {
+            name: name("Milch"),
+            tag: tag("2x"),
+        },
+    );
 
     assert_eq!(alice.items(), vec![(name("Milch"), tags(&["2x"]))]);
 }
@@ -111,9 +169,20 @@ fn tagging_an_item_nobody_added_creates_it() {
 fn re_adding_a_ticked_off_item_does_not_bring_its_tags_back() {
     let mut alice = ShoppingList::default();
     alice.edit(ALICE, Edit::add_item(name("Milch")));
-    alice.edit(ALICE, Edit::AddTag { name: name("Milch"), tag: tag("2x") });
+    alice.edit(
+        ALICE,
+        Edit::AddTag {
+            name: name("Milch"),
+            tag: tag("2x"),
+        },
+    );
 
-    alice.edit(ALICE, Edit::RemoveItem { name: name("Milch") });
+    alice.edit(
+        ALICE,
+        Edit::RemoveItem {
+            name: name("Milch"),
+        },
+    );
     alice.edit(ALICE, Edit::add_item(name("Milch")));
 
     assert_eq!(alice.items(), vec![(name("Milch"), tags(&[]))]);
@@ -125,7 +194,12 @@ fn a_stale_replica_does_not_resurrect_a_removed_item() {
     alice.edit(ALICE, Edit::add_item(name("Milch")));
     let stale = alice.clone();
 
-    alice.edit(ALICE, Edit::RemoveItem { name: name("Milch") });
+    alice.edit(
+        ALICE,
+        Edit::RemoveItem {
+            name: name("Milch"),
+        },
+    );
     alice.merge(stale);
 
     assert!(!alice.contains(&name("Milch")));

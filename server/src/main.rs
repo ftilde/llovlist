@@ -56,8 +56,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("token (give to each client): {token}");
             println!("hash  (pass to serve):       {}", token.hash());
         }
-        Command::Serve { addr, token_hash, state_dir, web_dir } => {
-            let state = AppState { store: Arc::new(Store::open(state_dir)?), token_hash };
+        Command::Serve {
+            addr,
+            token_hash,
+            state_dir,
+            web_dir,
+        } => {
+            let state = AppState {
+                store: Arc::new(Store::open(state_dir)?),
+                token_hash,
+            };
 
             let listener = tokio::net::TcpListener::bind(addr).await?;
             println!("listening on http://{}", listener.local_addr()?);
@@ -73,8 +81,10 @@ fn router(state: AppState, web_dir: Option<PathBuf>) -> Router {
         .allow_origin(Any)
         .allow_methods([Method::POST])
         .allow_headers([AUTHORIZATION, CONTENT_TYPE]);
-    let api =
-        Router::new().route("/api/lists/{list}/sync", post(sync)).layer(cors).with_state(state);
+    let api = Router::new()
+        .route("/api/lists/{list}/sync", post(sync))
+        .layer(cors)
+        .with_state(state);
     match web_dir {
         Some(dir) => {
             let shell = ServeFile::new(dir.join("index.html"));
@@ -90,10 +100,14 @@ async fn sync(
     Path(list): Path<ListId>,
     Json(incoming): Json<ShoppingList>,
 ) -> Result<Json<ShoppingList>, StatusCode> {
-    state.store.sync(&list, incoming).map(Json).map_err(|error| {
-        eprintln!("sync failed: {error}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })
+    state
+        .store
+        .sync(&list, incoming)
+        .map(Json)
+        .map_err(|error| {
+            eprintln!("sync failed: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
 }
 
 #[cfg(test)]
@@ -117,7 +131,10 @@ mod tests {
 
     fn list_with(device: u64, item: &str) -> ShoppingList {
         let mut list = ShoppingList::default();
-        list.edit(DeviceId::new(device), Edit::add_item(ItemName::new(item).unwrap()));
+        list.edit(
+            DeviceId::new(device),
+            Edit::add_item(ItemName::new(item).unwrap()),
+        );
         list
     }
 
@@ -139,7 +156,10 @@ mod tests {
     async fn names(body: Body) -> Vec<String> {
         let list: ShoppingList =
             serde_json::from_slice(&body.collect().await.unwrap().to_bytes()).unwrap();
-        list.items().into_iter().map(|(name, _)| name.to_string()).collect()
+        list.items()
+            .into_iter()
+            .map(|(name, _)| name.to_string())
+            .collect()
     }
 
     #[tokio::test]
@@ -160,8 +180,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (app, _) = serve(&dir);
 
-        let (status, _) =
-            post(&app, "/api/lists/home/sync", &"0".repeat(32), &ShoppingList::default()).await;
+        let (status, _) = post(
+            &app,
+            "/api/lists/home/sync",
+            &"0".repeat(32),
+            &ShoppingList::default(),
+        )
+        .await;
 
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }

@@ -33,7 +33,10 @@ pub async fn exchange(
         return Err(format!("server said {status}"));
     }
 
-    response.json().await.map_err(|error| format!("unreadable answer: {}", describe(error)))
+    response
+        .json()
+        .await
+        .map_err(|error| format!("unreadable answer: {}", describe(error)))
 }
 
 // reqwest's Display shows only its outermost layer; whether it was DNS, a refused

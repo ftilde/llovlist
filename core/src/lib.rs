@@ -27,7 +27,11 @@ impl std::error::Error for Blank {}
 
 fn trimmed(raw: &str) -> Result<String, Blank> {
     let trimmed = raw.trim();
-    if trimmed.is_empty() { Err(Blank) } else { Ok(trimmed.to_owned()) }
+    if trimmed.is_empty() {
+        Err(Blank)
+    } else {
+        Ok(trimmed.to_owned())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -85,7 +89,10 @@ pub enum Edit {
 
 impl Edit {
     pub fn add_item(name: ItemName) -> Self {
-        Self::AddItem { name, tags: BTreeSet::new() }
+        Self::AddItem {
+            name,
+            tags: BTreeSet::new(),
+        }
     }
 }
 
@@ -122,7 +129,8 @@ impl ShoppingList {
             Edit::AddItem { name, tags } => {
                 let ctx = self.items.read_ctx().derive_add_ctx(by);
                 // An empty `add_all` still registers the entry, so a tagless item exists.
-                self.items.update(name, ctx, |tags_crdt, ctx| tags_crdt.add_all(tags, ctx))
+                self.items
+                    .update(name, ctx, |tags_crdt, ctx| tags_crdt.add_all(tags, ctx))
             }
             Edit::RemoveItem { name } => {
                 let ctx = self.items.get(&name).derive_rm_ctx();
@@ -159,7 +167,11 @@ pub struct Session {
 
 impl Session {
     pub fn new(device: DeviceId, list: ShoppingList) -> Self {
-        Self { device, list, history: Vec::new() }
+        Self {
+            device,
+            list,
+            history: Vec::new(),
+        }
     }
 
     pub fn list(&self) -> &ShoppingList {
@@ -191,18 +203,30 @@ impl Session {
             Edit::AddItem { name, tags } if self.list.contains(name) => {
                 let known = self.list.tags(name);
                 tags.difference(&known)
-                    .map(|tag| Edit::RemoveTag { name: name.clone(), tag: tag.clone() })
+                    .map(|tag| Edit::RemoveTag {
+                        name: name.clone(),
+                        tag: tag.clone(),
+                    })
                     .collect()
             }
             Edit::AddItem { name, .. } => vec![Edit::RemoveItem { name: name.clone() }],
             Edit::RemoveItem { name } if self.list.contains(name) => {
-                vec![Edit::AddItem { name: name.clone(), tags: self.list.tags(name) }]
+                vec![Edit::AddItem {
+                    name: name.clone(),
+                    tags: self.list.tags(name),
+                }]
             }
             Edit::AddTag { name, tag } if !self.list.tags(name).contains(tag) => {
-                vec![Edit::RemoveTag { name: name.clone(), tag: tag.clone() }]
+                vec![Edit::RemoveTag {
+                    name: name.clone(),
+                    tag: tag.clone(),
+                }]
             }
             Edit::RemoveTag { name, tag } if self.list.tags(name).contains(tag) => {
-                vec![Edit::AddTag { name: name.clone(), tag: tag.clone() }]
+                vec![Edit::AddTag {
+                    name: name.clone(),
+                    tag: tag.clone(),
+                }]
             }
             _ => Vec::new(),
         }
@@ -227,8 +251,20 @@ mod tests {
     fn removing_the_last_tag_keeps_the_item() {
         let mut list = ShoppingList::default();
         list.edit(ALICE, Edit::add_item(name("Milch")));
-        list.edit(ALICE, Edit::AddTag { name: name("Milch"), tag: tag("2x") });
-        list.edit(ALICE, Edit::RemoveTag { name: name("Milch"), tag: tag("2x") });
+        list.edit(
+            ALICE,
+            Edit::AddTag {
+                name: name("Milch"),
+                tag: tag("2x"),
+            },
+        );
+        list.edit(
+            ALICE,
+            Edit::RemoveTag {
+                name: name("Milch"),
+                tag: tag("2x"),
+            },
+        );
 
         assert_eq!(list.items(), vec![(name("Milch"), BTreeSet::new())]);
     }
@@ -237,12 +273,20 @@ mod tests {
     fn undo_restores_a_ticked_off_item_with_its_tags() {
         let mut session = Session::new(ALICE, ShoppingList::default());
         session.edit(Edit::add_item(name("Milch")));
-        session.edit(Edit::AddTag { name: name("Milch"), tag: tag("2x") });
-        session.edit(Edit::RemoveItem { name: name("Milch") });
+        session.edit(Edit::AddTag {
+            name: name("Milch"),
+            tag: tag("2x"),
+        });
+        session.edit(Edit::RemoveItem {
+            name: name("Milch"),
+        });
 
         session.undo();
 
-        assert_eq!(session.list().tags(&name("Milch")), BTreeSet::from([tag("2x")]));
+        assert_eq!(
+            session.list().tags(&name("Milch")),
+            BTreeSet::from([tag("2x")])
+        );
     }
 
     #[test]
