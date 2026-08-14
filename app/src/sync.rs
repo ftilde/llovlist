@@ -1,20 +1,15 @@
 use std::time::Duration;
 
-use kauf_core::ShoppingList;
+use kauf_core::Lists;
 
 // Without this a firewalled host looks like a hang rather than a failure.
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-pub async fn exchange(
-    server: &str,
-    list: &str,
-    token: &str,
-    local: ShoppingList,
-) -> Result<ShoppingList, String> {
+pub async fn exchange(server: &str, token: &str, local: Lists) -> Result<Lists, String> {
     if server.is_empty() {
         return Err("set a server address first".to_owned());
     }
-    let url = format!("{}/api/lists/{list}/sync", server.trim_end_matches('/'));
+    let url = format!("{}/api/sync", server.trim_end_matches('/'));
 
     let response = reqwest::Client::new()
         .post(&url)

@@ -4,11 +4,11 @@ mod sync;
 use std::collections::BTreeSet;
 
 use dioxus::prelude::*;
-use kauf_core::{DeviceId, Edit, ItemName, Session, ShoppingList, Tag};
+use kauf_core::{DeviceId, Edit, ItemName, ListName, Lists, Session, Tag};
 use serde::{Deserialize, Serialize};
 
 const CSS: &str = include_str!("../assets/main.css");
-const LIST_KEY: &str = "list.json";
+const LISTS_KEY: &str = "lists.json";
 const SETTINGS_KEY: &str = "settings.json";
 
 // dioxus re-exports the same webview crate under two names, one per feature.
@@ -46,7 +46,6 @@ fn webview_config() -> webview::Config {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 struct Settings {
     server: String,
-    list: String,
     token: String,
     device: DeviceId,
 }
@@ -57,7 +56,6 @@ impl Settings {
             .and_then(|json| serde_json::from_str(&json).ok())
             .unwrap_or(Self {
                 server: String::new(),
-                list: "home".to_owned(),
                 token: String::new(),
                 device: DeviceId::new(storage::random_u64()),
             })
@@ -70,15 +68,15 @@ impl Settings {
     }
 }
 
-fn load_list() -> ShoppingList {
-    storage::load(LIST_KEY)
+fn load_lists() -> Lists {
+    storage::load(LISTS_KEY)
         .and_then(|json| serde_json::from_str(&json).ok())
         .unwrap_or_default()
 }
 
 fn store(session: Signal<Session>) {
-    if let Ok(json) = serde_json::to_string(session.read().list()) {
-        storage::save(LIST_KEY, &json);
+    if let Ok(json) = serde_json::to_string(session.read().lists()) {
+        storage::save(LISTS_KEY, &json);
     }
 }
 
@@ -92,23 +90,37 @@ fn undo(mut session: Signal<Session>) {
     store(session);
 }
 
-fn add_item(session: Signal<Session>, mut draft: Signal<String>) {
+fn add_item(session: Signal<Session>, list: ListName, mut draft: Signal<String>) {
     let name = ItemName::new(&draft.read()).ok();
     if let Some(name) = name {
-        apply(session, Edit::add_item(name));
+        apply(session, Edit::add_item(list, name));
+        draft.set(String::new());
+    }
+}
+
+fn create_list(
+    session: Signal<Session>,
+    mut current: Signal<Option<ListName>>,
+    mut draft: Signal<String>,
+) {
+    let list = ListName::new(&draft.read()).ok();
+    if let Some(list) = list {
+        apply(session, Edit::CreateList { list: list.clone() });
+        current.set(Some(list));
         draft.set(String::new());
     }
 }
 
 fn add_tag(
     on_edit: EventHandler<Edit>,
+    list: ListName,
     name: ItemName,
     mut draft: Signal<String>,
     mut adding: Signal<bool>,
 ) {
     let tag = Tag::new(&draft.read()).ok();
     if let Some(tag) = tag {
-        on_edit.call(Edit::AddTag { name, tag });
+        on_edit.call(Edit::AddTag { list, name, tag });
     }
     draft.set(String::new());
     adding.set(false);
@@ -121,17 +133,17 @@ fn start_sync(
     mut error: Signal<String>,
 ) {
     let settings = settings.read().clone();
-    let local = session.read().list().clone();
+    let local = session.read().lists().clone();
     spawn(async move {
         status.set("syncing…".to_owned());
         error.set(String::new());
-        match sync::exchange(&settings.server, &settings.list, &settings.token, local).await {
+        match sync::exchange(&settings.server, &settings.token, local).await {
             Ok(merged) => {
                 session.write().merge(merged);
                 store(session);
-                let count = session.read().list().items().len();
+                let count = session.read().lists().names().len();
                 let plural = if count == 1 { "" } else { "s" };
-                status.set(format!("synced, {count} item{plural}"));
+                status.set(format!("synced, {count} list{plural}"));
             }
             Err(reason) => {
                 status.set("sync failed".to_owned());
@@ -144,16 +156,28 @@ fn start_sync(
 #[component]
 fn App() -> Element {
     let settings = use_signal(Settings::load);
-    let session = use_signal(|| Session::new(settings.read().device, load_list()));
+    let session = use_signal(|| Session::new(settings.read().device, load_lists()));
     let status = use_signal(String::new);
     let mut error = use_signal(String::new);
+    let mut current = use_signal(|| session.read().lists().names().first().cloned());
     let mut draft = use_signal(String::new);
+    let mut new_list = use_signal(String::new);
     let mut settings_open = use_signal(|| false);
 
-    let items = session.read().list().items();
+    let names = session.read().lists().names();
     let can_undo = session.read().can_undo();
     let message = status();
     let failure = error();
+
+    // Falling back to the first name keeps a list selected when the current one is
+    // deleted here or disappears in a merge.
+    let selected = current()
+        .filter(|list| names.contains(list))
+        .or_else(|| names.first().cloned());
+    let items = selected
+        .as_ref()
+        .map(|list| session.read().lists().items(list))
+        .unwrap_or_default();
 
     rsx! {
         document::Style { {CSS} }
@@ -172,27 +196,84 @@ fn App() -> Element {
             SettingsPanel { settings }
         }
 
-        div { class: "add",
-            input {
-                placeholder: "add an item",
-                value: "{draft}",
-                oninput: move |event| draft.set(event.value()),
-                onkeydown: move |event: KeyboardEvent| {
-                    if event.key() == Key::Enter {
-                        add_item(session, draft);
+        div { class: "body",
+            nav { class: "tabs",
+                for name in names.clone() {
+                    button {
+                        key: "{name}",
+                        class: if Some(&name) == selected.as_ref() { "tab active" } else { "tab" },
+                        onclick: {
+                            let name = name.clone();
+                            move |_| current.set(Some(name.clone()))
+                        },
+                        "{name}"
                     }
-                },
+                }
+                input {
+                    class: "new-list",
+                    placeholder: "+ list",
+                    value: "{new_list}",
+                    oninput: move |event| new_list.set(event.value()),
+                    onkeydown: move |event: KeyboardEvent| {
+                        if event.key() == Key::Enter {
+                            create_list(session, current, new_list);
+                        }
+                    },
+                }
             }
-            button { onclick: move |_| add_item(session, draft), "+" }
-        }
 
-        if items.is_empty() {
-            p { class: "empty", "nothing to buy" }
-        }
+            main {
+                if let Some(list) = selected.clone() {
+                    div { class: "add",
+                        input {
+                            placeholder: "add an item",
+                            value: "{draft}",
+                            oninput: move |event| draft.set(event.value()),
+                            onkeydown: {
+                                let list = list.clone();
+                                move |event: KeyboardEvent| {
+                                    if event.key() == Key::Enter {
+                                        add_item(session, list.clone(), draft);
+                                    }
+                                }
+                            },
+                        }
+                        button {
+                            onclick: {
+                                let list = list.clone();
+                                move |_| add_item(session, list.clone(), draft)
+                            },
+                            "+"
+                        }
+                    }
 
-        ul { class: "items",
-            for (name, tags) in items {
-                ItemRow { key: "{name}", name, tags, on_edit: move |edit| apply(session, edit) }
+                    if items.is_empty() {
+                        p { class: "empty", "nothing to buy" }
+                    }
+
+                    ul { class: "items",
+                        for (name, tags) in items.clone() {
+                            ItemRow {
+                                key: "{name}",
+                                list: list.clone(),
+                                name,
+                                tags,
+                                on_edit: move |edit| apply(session, edit),
+                            }
+                        }
+                    }
+
+                    button {
+                        class: "delete-list",
+                        onclick: {
+                            let list = list.clone();
+                            move |_| apply(session, Edit::RemoveList { list: list.clone() })
+                        },
+                        "delete list “{list}”"
+                    }
+                } else {
+                    p { class: "empty", "no list yet — name one on the left" }
+                }
             }
         }
 
@@ -213,7 +294,12 @@ fn App() -> Element {
 }
 
 #[component]
-fn ItemRow(name: ItemName, tags: BTreeSet<Tag>, on_edit: EventHandler<Edit>) -> Element {
+fn ItemRow(
+    list: ListName,
+    name: ItemName,
+    tags: BTreeSet<Tag>,
+    on_edit: EventHandler<Edit>,
+) -> Element {
     let mut adding = use_signal(|| false);
     let mut draft = use_signal(String::new);
 
@@ -223,8 +309,14 @@ fn ItemRow(name: ItemName, tags: BTreeSet<Tag>, on_edit: EventHandler<Edit>) -> 
                 class: "tick",
                 title: "got it",
                 onclick: {
-                    let name = name.clone();
-                    move |_| on_edit.call(Edit::RemoveItem { name: name.clone() })
+                    let (list, name) = (list.clone(), name.clone());
+                    move |_| {
+                        on_edit
+                            .call(Edit::RemoveItem {
+                                list: list.clone(),
+                                name: name.clone(),
+                            })
+                    }
                 },
                 "✓"
             }
@@ -235,9 +327,14 @@ fn ItemRow(name: ItemName, tags: BTreeSet<Tag>, on_edit: EventHandler<Edit>) -> 
                         key: "{tag}",
                         class: "tag",
                         onclick: {
-                            let (name, tag) = (name.clone(), tag.clone());
+                            let (list, name, tag) = (list.clone(), name.clone(), tag.clone());
                             move |_| {
-                                on_edit.call(Edit::RemoveTag { name: name.clone(), tag: tag.clone() })
+                                on_edit
+                                    .call(Edit::RemoveTag {
+                                        list: list.clone(),
+                                        name: name.clone(),
+                                        tag: tag.clone(),
+                                    })
                             }
                         },
                         "{tag} ×"
@@ -251,9 +348,11 @@ fn ItemRow(name: ItemName, tags: BTreeSet<Tag>, on_edit: EventHandler<Edit>) -> 
                         value: "{draft}",
                         oninput: move |event| draft.set(event.value()),
                         onkeydown: {
-                            let name = name.clone();
+                            let (list, name) = (list.clone(), name.clone());
                             move |event: KeyboardEvent| match event.key() {
-                                Key::Enter => add_tag(on_edit, name.clone(), draft, adding),
+                                Key::Enter => {
+                                    add_tag(on_edit, list.clone(), name.clone(), draft, adding)
+                                }
                                 Key::Escape => adding.set(false),
                                 _ => {}
                             }
@@ -285,13 +384,6 @@ fn SettingsPanel(settings: Signal<Settings>) -> Element {
                     placeholder: "https://host:8080",
                     value: "{current.server}",
                     oninput: move |event| update(|s, v| s.server = v, event.value()),
-                }
-            }
-            label {
-                "list"
-                input {
-                    value: "{current.list}",
-                    oninput: move |event| update(|s, v| s.list = v, event.value()),
                 }
             }
             label {
