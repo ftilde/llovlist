@@ -111,7 +111,19 @@ input {
   color: var(--accent);
 }
 
+.add-list {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.add-list button {
+  min-height: 2.25rem;
+  width: 2rem;
+  padding: 0;
+}
+
 .new-list {
+  min-width: 0;
   min-height: 2.25rem;
   font-size: 0.85rem;
 }

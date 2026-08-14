@@ -419,16 +419,22 @@ fn App() -> Element {
                         }
                     }
                 }
-                input {
-                    class: "new-list",
-                    placeholder: "+ list",
-                    value: "{new_list}",
-                    oninput: move |event| new_list.set(event.value()),
-                    onkeydown: move |event: KeyboardEvent| {
-                        if event.key() == Key::Enter {
-                            create_list(session, current, new_list);
-                        }
-                    },
+                div { class: "add-list",
+                    input {
+                        class: "new-list",
+                        placeholder: "list",
+                        value: "{new_list}",
+                        // Without this Android offers Next, which moves focus to the next
+                        // field instead of sending Enter.
+                        enterkeyhint: "done",
+                        oninput: move |event| new_list.set(event.value()),
+                        onkeydown: move |event: KeyboardEvent| {
+                            if event.key() == Key::Enter {
+                                create_list(session, current, new_list);
+                            }
+                        },
+                    }
+                    button { onclick: move |_| create_list(session, current, new_list), "+" }
                 }
                 if can_restore {
                     button {
@@ -445,6 +451,7 @@ fn App() -> Element {
                         input {
                             placeholder: "add an item",
                             value: "{draft}",
+                            enterkeyhint: "done",
                             oninput: move |event| draft.set(event.value()),
                             onkeydown: {
                                 let list = list.clone();
@@ -604,6 +611,7 @@ fn ItemRow(
                         placeholder: "2x",
                         autofocus: true,
                         value: "{draft}",
+                        enterkeyhint: "done",
                         oninput: move |event| draft.set(event.value()),
                         onkeydown: {
                             let (list, name) = (list.clone(), name.clone());
