@@ -241,14 +241,27 @@ impl Lists {
         self.item_key_between(by, list, items.last().map(|(name, _)| name), None)
     }
 
+    /// Position putting `list` at `slot` of the order with `list` taken out.
+    pub fn key_for_slot(&self, by: DeviceId, list: &ListName, slot: usize) -> Option<OrderKey> {
+        let (after, before) = neighbours_at(self.names(), list, slot)?;
+        Some(self.key_between(by, after.as_ref(), before.as_ref()))
+    }
+
+    pub fn item_key_for_slot(
+        &self,
+        by: DeviceId,
+        list: &ListName,
+        name: &ItemName,
+        slot: usize,
+    ) -> Option<OrderKey> {
+        let (after, before) = neighbours_at(self.item_names(list), name, slot)?;
+        Some(self.item_key_between(by, list, after.as_ref(), before.as_ref()))
+    }
+
     /// Position moving `list` `offset` places, or `None` if it cannot move that far.
     pub fn key_for_move(&self, by: DeviceId, list: &ListName, offset: isize) -> Option<OrderKey> {
-        let (slot, without) = slot_and_neighbours(self.names(), list, offset)?;
-        Some(self.key_between(
-            by,
-            slot.checked_sub(1).and_then(|index| without.get(index)),
-            without.get(slot),
-        ))
+        let slot = step(&self.names(), list, offset)?;
+        self.key_for_slot(by, list, slot)
     }
 
     pub fn item_key_for_move(
@@ -258,14 +271,12 @@ impl Lists {
         name: &ItemName,
         offset: isize,
     ) -> Option<OrderKey> {
-        let order: Vec<ItemName> = self.items(list).into_iter().map(|(name, _)| name).collect();
-        let (slot, without) = slot_and_neighbours(order, name, offset)?;
-        Some(self.item_key_between(
-            by,
-            list,
-            slot.checked_sub(1).and_then(|index| without.get(index)),
-            without.get(slot),
-        ))
+        let slot = step(&self.item_names(list), name, offset)?;
+        self.item_key_for_slot(by, list, name, slot)
+    }
+
+    pub fn item_names(&self, list: &ListName) -> Vec<ItemName> {
+        self.items(list).into_iter().map(|(name, _)| name).collect()
     }
 
     pub fn has(&self, list: &ListName) -> bool {
@@ -412,20 +423,32 @@ impl Lists {
     }
 }
 
-/// Where `subject` lands after moving `offset` places, plus the order without it.
-fn slot_and_neighbours<T: PartialEq>(
+/// The entries `subject` would sit between at `slot` of the order with it taken out.
+fn neighbours_at<T: PartialEq + Clone>(
     order: Vec<T>,
     subject: &T,
-    offset: isize,
-) -> Option<(usize, Vec<T>)> {
+    slot: usize,
+) -> Option<(Option<T>, Option<T>)> {
     let at = order.iter().position(|entry| entry == subject)?;
-    let slot = usize::try_from(at as isize + offset).ok()?;
-    if slot >= order.len() {
-        return None;
-    }
     let mut without = order;
     without.remove(at);
-    Some((slot, without))
+    // One past the end is a valid landing place; further is not.
+    if slot > without.len() {
+        return None;
+    }
+    Some((
+        slot.checked_sub(1)
+            .and_then(|index| without.get(index))
+            .cloned(),
+        without.get(slot).cloned(),
+    ))
+}
+
+/// Slot `offset` places from where `subject` sits, or `None` if that leaves the order.
+fn step<T: PartialEq>(order: &[T], subject: &T, offset: isize) -> Option<usize> {
+    let at = order.iter().position(|entry| entry == subject)?;
+    let slot = usize::try_from(at as isize + offset).ok()?;
+    (slot < order.len()).then_some(slot)
 }
 
 // Registering a list needs an op for its contents; the outer Up carries the dot that
@@ -481,6 +504,19 @@ impl Session {
     ) -> Option<OrderKey> {
         self.lists
             .item_key_for_move(self.device, list, name, offset)
+    }
+
+    pub fn key_for_slot(&self, list: &ListName, slot: usize) -> Option<OrderKey> {
+        self.lists.key_for_slot(self.device, list, slot)
+    }
+
+    pub fn item_key_for_slot(
+        &self,
+        list: &ListName,
+        name: &ItemName,
+        slot: usize,
+    ) -> Option<OrderKey> {
+        self.lists.item_key_for_slot(self.device, list, name, slot)
     }
 
     pub fn edit(&mut self, edit: Edit) {
@@ -684,6 +720,47 @@ mod tests {
         assert_eq!(
             item_order(&session),
             [name("kaffee"), name("milch"), name("brot")]
+        );
+    }
+
+    #[test]
+    fn an_item_can_be_dropped_into_any_slot() {
+        let mut session = home_with_items();
+
+        for (slot, expected) in [
+            (0, ["kaffee", "milch", "brot"]),
+            (1, ["milch", "kaffee", "brot"]),
+            (2, ["milch", "brot", "kaffee"]),
+        ] {
+            let key = session
+                .item_key_for_slot(&list("home"), &name("kaffee"), slot)
+                .unwrap();
+            session.edit(Edit::MoveItem {
+                list: list("home"),
+                name: name("kaffee"),
+                key,
+            });
+            assert_eq!(
+                item_order(&session),
+                expected.map(name).to_vec(),
+                "dropping kaffee into slot {slot}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_slot_past_the_end_is_refused() {
+        let session = home_with_items();
+
+        // Three items, so slots 0..=2 exist once the dragged one is taken out.
+        assert!(
+            session
+                .item_key_for_slot(&list("home"), &name("kaffee"), 2)
+                .is_some()
+        );
+        assert_eq!(
+            session.item_key_for_slot(&list("home"), &name("kaffee"), 3),
+            None
         );
     }
 

@@ -116,16 +116,6 @@ input {
   font-size: 0.85rem;
 }
 
-.reorder {
-  display: flex;
-  gap: 0.35rem;
-}
-
-.reorder button {
-  flex: 1 1 0;
-  min-height: 2rem;
-  padding: 0;
-}
 
 main {
   flex: 1 1 auto;
@@ -179,19 +169,53 @@ main {
   border-bottom: 1px solid var(--line);
 }
 
-.shift {
-  display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
+.grip {
+  min-height: 2.5rem;
+  width: 1.75rem;
+  padding: 0;
+  border-color: transparent;
+  color: var(--muted);
+  font-size: 1rem;
+  cursor: grab;
+  /* Without this the webview claims a vertical drag as a scroll gesture. */
+  touch-action: none;
 }
 
-.shift button {
-  min-height: 1.2rem;
-  width: 1.6rem;
-  padding: 0;
-  font-size: 0.7rem;
-  line-height: 1;
-  color: var(--muted);
+.dragged {
+  opacity: 0.45;
+}
+
+.drag-catcher {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  touch-action: none;
+}
+
+/* Inset, so revealing the line does not shift the row being aimed at. */
+.drop-above {
+  box-shadow: inset 0 2px 0 0 var(--accent);
+}
+
+.drop-below {
+  box-shadow: inset 0 -2px 0 0 var(--accent);
+}
+
+.tab-row {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+}
+
+.tab-row .grip {
+  min-height: 2.25rem;
+  width: 1.1rem;
+  font-size: 0.75rem;
+}
+
+.tab-row .tab {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .tick {
