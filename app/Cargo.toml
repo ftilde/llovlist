@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 dioxus = { version = "0.7" }
+getrandom = "0.3"
 kauf-core.workspace = true
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
@@ -18,14 +19,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 serde.workspace = true
 serde_json.workspace = true
 
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Location", "Storage", "Window"] }
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-getrandom = "0.3"
-
-[target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))'.dependencies]
+[target.'cfg(not(target_os = "android"))'.dependencies]
 dirs = "6"
 
 [target.'cfg(target_os = "android")'.dependencies]
@@ -34,6 +28,5 @@ ndk-context = "0.1"
 
 [features]
 default = []
-web = ["dioxus/web"]
 desktop = ["dioxus/desktop"]
 mobile = ["dioxus/mobile"]

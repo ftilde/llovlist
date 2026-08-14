@@ -40,18 +40,14 @@ pub async fn exchange(
 }
 
 // reqwest's Display shows only its outermost layer; whether it was DNS, a refused
-// connection or TLS is in source(). On wasm each layer appends a JS stack trace.
+// connection or TLS is in source().
 fn describe(error: reqwest::Error) -> String {
-    let mut message = first_line(&error.to_string());
+    let mut message = error.to_string();
     let mut cause = std::error::Error::source(&error);
     while let Some(error) = cause {
         message.push_str(": ");
-        message.push_str(&first_line(&error.to_string()));
+        message.push_str(&error.to_string());
         cause = error.source();
     }
     message
-}
-
-fn first_line(text: &str) -> String {
-    text.lines().next().unwrap_or_default().to_owned()
 }

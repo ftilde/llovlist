@@ -4,9 +4,6 @@ name = "1kauf"
 # defaults, so both are needed or the native library outruns the declared minimum.
 android_min_sdk_version = 28
 
-[web.app]
-title = "1kauf"
-
 [bundle]
 identifier = "com.ftilde.kauf"
 

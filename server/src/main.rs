@@ -8,13 +8,10 @@ use std::sync::Arc;
 use axum::Json;
 use axum::Router;
 use axum::extract::{FromRef, Path, State};
-use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
-use axum::http::{Method, StatusCode};
+use axum::http::StatusCode;
 use axum::routing::post;
 use clap::Parser;
 use kauf_core::ShoppingList;
-use tower_http::cors::{Any, CorsLayer};
-use tower_http::services::{ServeDir, ServeFile};
 
 use auth::{Authenticated, Token, TokenHash};
 use store::{ListId, Store};
@@ -31,8 +28,6 @@ enum Command {
         token_hash: TokenHash,
         #[arg(long, default_value = "lists")]
         state_dir: PathBuf,
-        #[arg(long)]
-        web_dir: Option<PathBuf>,
     },
 }
 
@@ -60,7 +55,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             addr,
             token_hash,
             state_dir,
-            web_dir,
         } => {
             let state = AppState {
                 store: Arc::new(Store::open(state_dir)?),
@@ -69,29 +63,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let listener = tokio::net::TcpListener::bind(addr).await?;
             println!("listening on http://{}", listener.local_addr()?);
-            axum::serve(listener, router(state, web_dir)).await?;
+            axum::serve(listener, router(state)).await?;
         }
     }
     Ok(())
 }
 
-fn router(state: AppState, web_dir: Option<PathBuf>) -> Router {
-    // Any origin is safe here only because the credential is a bearer token, not a cookie.
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods([Method::POST])
-        .allow_headers([AUTHORIZATION, CONTENT_TYPE]);
-    let api = Router::new()
+fn router(state: AppState) -> Router {
+    Router::new()
         .route("/api/lists/{list}/sync", post(sync))
-        .layer(cors)
-        .with_state(state);
-    match web_dir {
-        Some(dir) => {
-            let shell = ServeFile::new(dir.join("index.html"));
-            api.fallback_service(ServeDir::new(dir).fallback(shell))
-        }
-        None => api,
-    }
+        .with_state(state)
 }
 
 async fn sync(
@@ -126,7 +107,7 @@ mod tests {
             store: Arc::new(Store::open(dir.path().to_owned()).unwrap()),
             token_hash: token.hash(),
         };
-        (router(state, None), token)
+        (router(state), token)
     }
 
     fn list_with(device: u64, item: &str) -> ShoppingList {

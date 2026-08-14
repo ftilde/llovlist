@@ -56,7 +56,7 @@ impl Settings {
         storage::load(SETTINGS_KEY)
             .and_then(|json| serde_json::from_str(&json).ok())
             .unwrap_or(Self {
-                server: storage::default_server(),
+                server: String::new(),
                 list: "home".to_owned(),
                 token: String::new(),
                 device: DeviceId::new(storage::random_u64()),

@@ -6,7 +6,6 @@ members = ["app", "core", "server"]
 version = "0.1.0"
 edition = "2024"
 
-# Without this, DWARF left in the wasm makes wasm-opt abort and the bundle ships unoptimised.
 [profile.release]
 strip = true
 
