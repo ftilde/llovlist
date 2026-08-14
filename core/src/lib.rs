@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 
 use crdts::identifier::Identifier;
@@ -464,7 +464,8 @@ fn inert() -> map::Op<ItemName, Orswot<Tag, DeviceId>, DeviceId> {
 pub struct Session {
     device: DeviceId,
     lists: Lists,
-    history: Vec<Vec<Edit>>,
+    history: HashMap<ListName, Vec<Vec<Edit>>>,
+    deleted: Vec<Vec<Edit>>,
 }
 
 impl Session {
@@ -472,7 +473,8 @@ impl Session {
         Self {
             device,
             lists,
-            history: Vec::new(),
+            history: HashMap::new(),
+            deleted: Vec::new(),
         }
     }
 
@@ -480,8 +482,14 @@ impl Session {
         &self.lists
     }
 
-    pub fn can_undo(&self) -> bool {
-        !self.history.is_empty()
+    pub fn can_undo(&self, list: &ListName) -> bool {
+        self.history
+            .get(list)
+            .is_some_and(|stack| !stack.is_empty())
+    }
+
+    pub fn can_restore(&self) -> bool {
+        !self.deleted.is_empty()
     }
 
     pub fn key_at_end(&self) -> OrderKey {
@@ -521,12 +529,42 @@ impl Session {
 
     pub fn edit(&mut self, edit: Edit) {
         let revert = self.revert_of(&edit);
-        self.history.push(revert);
+        match &edit {
+            // Deleting a list outlives the list, so its restore goes on its own stack --
+            // and the list's own history describes a state that no longer exists.
+            Edit::RemoveList { list } => {
+                self.history.remove(list);
+                if !revert.is_empty() {
+                    self.deleted.push(revert);
+                }
+            }
+            // Reordering is cheap to redo by hand and undoing it surprises more than it
+            // helps, so it records nothing.
+            Edit::CreateList { .. } | Edit::MoveList { .. } | Edit::MoveItem { .. } => {}
+            Edit::AddItem { list, .. }
+            | Edit::RemoveItem { list, .. }
+            | Edit::AddTag { list, .. }
+            | Edit::RemoveTag { list, .. } => {
+                if !revert.is_empty() {
+                    self.history.entry(list.clone()).or_default().push(revert);
+                }
+            }
+        }
         self.lists.edit(self.device, edit);
     }
 
-    pub fn undo(&mut self) {
-        for edit in self.history.pop().unwrap_or_default() {
+    pub fn undo(&mut self, list: &ListName) {
+        let Some(revert) = self.history.get_mut(list).and_then(Vec::pop) else {
+            return;
+        };
+        for edit in revert {
+            self.lists.edit(self.device, edit);
+        }
+    }
+
+    /// Puts the most recently deleted list back, with its items, tags and position.
+    pub fn restore_deleted(&mut self) {
+        for edit in self.deleted.pop().unwrap_or_default() {
             self.lists.edit(self.device, edit);
         }
     }
@@ -537,13 +575,7 @@ impl Session {
 
     fn revert_of(&self, edit: &Edit) -> Vec<Edit> {
         match edit {
-            Edit::CreateList { list, .. } if self.lists.has(list) => Vec::new(),
-            Edit::CreateList { list, .. } => vec![Edit::RemoveList { list: list.clone() }],
-            Edit::MoveList { list, .. } if self.lists.has(list) => vec![Edit::MoveList {
-                list: list.clone(),
-                key: self.list_key(list),
-            }],
-            Edit::MoveList { .. } => Vec::new(),
+            Edit::CreateList { .. } | Edit::MoveList { .. } | Edit::MoveItem { .. } => Vec::new(),
             Edit::RemoveList { list } if self.lists.has(list) => {
                 let mut restore = vec![Edit::CreateList {
                     list: list.clone(),
@@ -575,14 +607,6 @@ impl Session {
                 list: list.clone(),
                 name: name.clone(),
             }],
-            Edit::MoveItem { list, name, .. } if self.lists.contains(list, name) => {
-                vec![Edit::MoveItem {
-                    list: list.clone(),
-                    name: name.clone(),
-                    key: self.item_key(list, name),
-                }]
-            }
-            Edit::MoveItem { .. } => Vec::new(),
             Edit::RemoveItem { list, name } if self.lists.contains(list, name) => {
                 vec![Edit::AddItem {
                     key: self.item_key(list, name),
@@ -783,8 +807,12 @@ mod tests {
     }
 
     #[test]
-    fn undo_of_an_item_move_puts_it_back() {
+    fn moving_an_item_records_nothing_to_undo() {
         let mut session = home_with_items();
+        session.edit(Edit::RemoveItem {
+            list: list("home"),
+            name: name("brot"),
+        });
 
         let key = session
             .item_key_for_move(&list("home"), &name("kaffee"), -1)
@@ -794,11 +822,12 @@ mod tests {
             name: name("kaffee"),
             key,
         });
-        session.undo();
+        session.undo(&list("home"));
 
+        // The move is left alone; undo reaches past it to the tick-off.
         assert_eq!(
             item_order(&session),
-            [name("milch"), name("brot"), name("kaffee")]
+            [name("kaffee"), name("milch"), name("brot")]
         );
     }
 
@@ -810,7 +839,7 @@ mod tests {
             list: list("home"),
             name: name("brot"),
         });
-        session.undo();
+        session.undo(&list("home"));
 
         assert_eq!(
             item_order(&session),
@@ -886,7 +915,7 @@ mod tests {
     }
 
     #[test]
-    fn undo_of_a_move_puts_the_list_back() {
+    fn moving_a_list_records_nothing_to_undo() {
         let mut session = three_lists();
 
         let key = session.key_for_move(&list("c"), -1).unwrap();
@@ -894,20 +923,18 @@ mod tests {
             list: list("c"),
             key,
         });
-        session.undo();
 
-        assert_eq!(
-            session.lists().names(),
-            vec![list("a"), list("b"), list("c")]
-        );
+        assert!(!session.can_undo(&list("c")));
+        assert!(!session.can_restore());
     }
 
     #[test]
-    fn undo_of_a_delete_restores_the_position_too() {
+    fn restoring_a_deleted_list_puts_it_back_in_place() {
         let mut session = three_lists();
 
         session.edit(Edit::RemoveList { list: list("b") });
-        session.undo();
+        assert!(session.can_restore());
+        session.restore_deleted();
 
         assert_eq!(
             session.lists().names(),
@@ -927,7 +954,7 @@ mod tests {
         });
         session.edit(Edit::RemoveList { list: list("home") });
 
-        session.undo();
+        session.restore_deleted();
 
         assert_eq!(session.lists().names(), vec![list("home")]);
         assert_eq!(
@@ -936,16 +963,54 @@ mod tests {
         );
     }
 
+    // An edit that changed nothing costs no undo press; the next one reaches past it.
     #[test]
-    fn undo_of_adding_an_item_that_was_already_there_keeps_it() {
+    fn re_adding_an_item_records_no_undo_step() {
         let mut session = Session::new(ALICE, Lists::default());
         let first = add(&session, "home", "milch");
         session.edit(first);
         let again = add(&session, "home", "milch");
         session.edit(again);
 
-        session.undo();
+        session.undo(&list("home"));
 
-        assert!(session.lists().contains(&list("home"), &name("milch")));
+        assert!(!session.lists().contains(&list("home"), &name("milch")));
+        assert!(!session.can_undo(&list("home")));
+    }
+
+    #[test]
+    fn each_list_undoes_on_its_own() {
+        let mut session = Session::new(ALICE, Lists::default());
+        for (in_list, item) in [("home", "milch"), ("baumarkt", "schrauben")] {
+            let edit = add(&session, in_list, item);
+            session.edit(edit);
+        }
+
+        session.undo(&list("home"));
+
+        assert!(!session.lists().contains(&list("home"), &name("milch")));
+        assert!(
+            session
+                .lists()
+                .contains(&list("baumarkt"), &name("schrauben"))
+        );
+        assert!(!session.can_undo(&list("home")));
+        assert!(session.can_undo(&list("baumarkt")));
+    }
+
+    #[test]
+    fn deleting_a_list_drops_its_undo_history() {
+        let mut session = home_with_items();
+        session.edit(Edit::RemoveItem {
+            list: list("home"),
+            name: name("brot"),
+        });
+
+        session.edit(Edit::RemoveList { list: list("home") });
+        session.restore_deleted();
+
+        // The restored list is whole, and its earlier steps are not replayable onto it.
+        assert!(!session.can_undo(&list("home")));
+        assert_eq!(item_order(&session), [name("milch"), name("kaffee")]);
     }
 }

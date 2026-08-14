@@ -85,8 +85,13 @@ fn apply(mut session: Signal<Session>, edit: Edit) {
     store(session);
 }
 
-fn undo(mut session: Signal<Session>) {
-    session.write().undo();
+fn undo(mut session: Signal<Session>, list: &ListName) {
+    session.write().undo(list);
+    store(session);
+}
+
+fn restore_deleted(mut session: Signal<Session>) {
+    session.write().restore_deleted();
     store(session);
 }
 
@@ -344,7 +349,7 @@ fn App() -> Element {
     let list_line = list_drag().map(|drag| drag.line_before());
     let item_line = item_drag().map(|drag| drag.line_before());
     let names = session.read().lists().names();
-    let can_undo = session.read().can_undo();
+    let can_restore = session.read().can_restore();
     let message = status();
     let failure = error();
 
@@ -357,12 +362,26 @@ fn App() -> Element {
         .as_ref()
         .map(|list| session.read().lists().items(list))
         .unwrap_or_default();
+    let can_undo = selected
+        .as_ref()
+        .is_some_and(|list| session.read().can_undo(list));
 
     rsx! {
         document::Style { {CSS} }
         header {
             h1 { "1kauf" }
-            button { disabled: !can_undo, onclick: move |_| undo(session), "undo" }
+            button {
+                disabled: !can_undo,
+                onclick: {
+                    let selected = selected.clone();
+                    move |_| {
+                        if let Some(list) = selected.clone() {
+                            undo(session, &list);
+                        }
+                    }
+                },
+                "undo"
+            }
             button { onclick: move |_| start_sync(session, settings, status, error), "sync" }
             button {
                 class: if settings_open() { "active" },
@@ -410,6 +429,13 @@ fn App() -> Element {
                             create_list(session, current, new_list);
                         }
                     },
+                }
+                if can_restore {
+                    button {
+                        class: "restore",
+                        onclick: move |_| restore_deleted(session),
+                        "restore list"
+                    }
                 }
             }
 
