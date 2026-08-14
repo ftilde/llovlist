@@ -195,6 +195,6 @@ input {
   margin: 0;
   font-size: 0.85rem;
   color: var(--muted);
-  /* Long URLs in reqwest errors would otherwise push the card off screen. */
+  /* Error text contains URLs, which have no break opportunities. */
   overflow-wrap: anywhere;
 }

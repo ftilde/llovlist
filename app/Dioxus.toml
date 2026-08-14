@@ -1,8 +1,7 @@
 [application]
 name = "1kauf"
-# dx reads the manifest minSdk and the NDK API level from two different keys with
-# two different defaults (24 and 28); pinning both stops the native library from
-# requiring a newer Android than the manifest admits to.
+# Sets the NDK API level; [android] min_sdk sets the manifest. Different keys, different
+# defaults, so both are needed or the native library outruns the declared minimum.
 android_min_sdk_version = 28
 
 [web.app]

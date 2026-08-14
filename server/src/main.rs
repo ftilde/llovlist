@@ -68,8 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn router(state: AppState, web_dir: Option<PathBuf>) -> Router {
-    // Any origin is fine: the credential is a bearer token, so a foreign page that
-    // does not have it gets a 401, and one that does was given it on purpose.
+    // Any origin is safe here only because the credential is a bearer token, not a cookie.
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods([Method::POST])
@@ -77,7 +76,6 @@ fn router(state: AppState, web_dir: Option<PathBuf>) -> Router {
     let api =
         Router::new().route("/api/lists/{list}/sync", post(sync)).layer(cors).with_state(state);
     match web_dir {
-        // Unknown paths fall back to the app shell, so deep links work.
         Some(dir) => {
             let shell = ServeFile::new(dir.join("index.html"));
             api.fallback_service(ServeDir::new(dir).fallback(shell))

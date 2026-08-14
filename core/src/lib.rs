@@ -4,9 +4,7 @@ use std::fmt;
 use crdts::{CmRDT, CvRDT, Map, Orswot};
 use serde::{Deserialize, Serialize};
 
-// Two replicas sharing an id mint the same dots, so each reads the other's entries
-// as ones it already removed and both sides lose data. Must be random per install,
-// and re-generated after restoring a backup.
+// Two replicas sharing an id mint the same dots and silently drop each other's entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct DeviceId(u64);
 
@@ -156,8 +154,6 @@ impl ShoppingList {
 pub struct Session {
     device: DeviceId,
     list: ShoppingList,
-    // Reverting edits, newest last. Local and in memory, so remote changes are never
-    // undoable and history dies with the process.
     history: Vec<Vec<Edit>>,
 }
 
@@ -190,8 +186,6 @@ impl Session {
         self.list.merge(remote);
     }
 
-    // Compared against current state so that undoing an edit which only partly
-    // changed the list restores exactly what it changed.
     fn revert_of(&self, edit: &Edit) -> Vec<Edit> {
         match edit {
             Edit::AddItem { name, tags } if self.list.contains(name) => {

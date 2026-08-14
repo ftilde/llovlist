@@ -12,15 +12,15 @@ const LIST_KEY: &str = "list.json";
 const SETTINGS_KEY: &str = "settings.json";
 
 fn main() {
-    dioxus::LaunchBuilder::new()
-        .with_cfg(desktop! {
-            use dioxus::desktop::{Config, WindowBuilder};
-            // GTK ignores xdg-decoration, so a tiling WM cannot drop the title bar for us.
-            Config::new().with_window(
-                WindowBuilder::new().with_decorations(false).with_title("1kauf"),
-            )
-        })
-        .launch(App);
+    #[cfg(feature = "desktop")]
+    {
+        use dioxus::desktop::{Config, WindowBuilder};
+        // GTK ignores xdg-decoration, so a tiling WM cannot remove the title bar itself.
+        let window = WindowBuilder::new().with_decorations(false).with_title("1kauf");
+        dioxus::LaunchBuilder::desktop().with_cfg(Config::new().with_window(window)).launch(App);
+    }
+    #[cfg(not(feature = "desktop"))]
+    dioxus::launch(App);
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]

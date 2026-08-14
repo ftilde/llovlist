@@ -23,8 +23,7 @@ proptest! {
             replicas[replica].edit(DeviceId::new(replica as u64), edit);
         }
 
-        // Two rounds of everyone-merges-everyone: enough for a change to reach every
-        // replica even when it is only observed second-hand.
+        // Two rounds: a change must also reach replicas that only observe it second-hand.
         for _ in 0..2 {
             let snapshot = replicas.clone();
             for replica in &mut replicas {

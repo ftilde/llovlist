@@ -1,6 +1,3 @@
-// What edits on one device do to another device's list after a merge. None of this
-// is guessable from the call sites, so it is written down.
-
 use std::collections::BTreeSet;
 
 use kauf_core::{DeviceId, Edit, ItemName, ShoppingList, Tag};
@@ -57,8 +54,6 @@ fn a_concurrent_add_beats_a_tick_off() {
     assert!(alice.contains(&name("Milch")));
 }
 
-// The surprising one: a tick-off clears every tag the ticker had already seen, so an
-// item that survives on a concurrent edit comes back carrying only that edit's tags.
 #[test]
 fn a_tick_off_wipes_the_tags_it_had_seen_but_not_concurrent_ones() {
     let mut alice = ShoppingList::default();
@@ -136,7 +131,7 @@ fn a_stale_replica_does_not_resurrect_a_removed_item() {
     assert!(!alice.contains(&name("Milch")));
 }
 
-// Not a wish, a warning: this is what a duplicated DeviceId costs.
+// Asserts the loss a duplicated DeviceId causes; not a behaviour to repair.
 #[test]
 fn sharing_a_device_id_between_replicas_loses_edits() {
     let mut alice = ShoppingList::default();

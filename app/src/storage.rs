@@ -6,7 +6,6 @@ mod platform {
         web_sys::window()?.local_storage().ok()?
     }
 
-    // The web app is normally served by the sync server itself.
     pub fn default_server() -> String {
         web_sys::window().and_then(|window| window.location().origin().ok()).unwrap_or_default()
     }

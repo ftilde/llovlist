@@ -13,8 +13,7 @@ use serde::Deserialize;
 pub struct ListId(String);
 
 impl ListId {
-    // Doubles as a file name, so the tight character set is what keeps an id from
-    // escaping the state directory.
+    // Doubles as a file name; this character set is what keeps an id inside the state dir.
     pub fn new(raw: &str) -> Result<Self, InvalidListId> {
         let allowed = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_';
         if (1..=64).contains(&raw.len()) && raw.bytes().all(allowed) {
