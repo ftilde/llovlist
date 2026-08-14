@@ -11,20 +11,36 @@ const CSS: &str = include_str!("../assets/main.css");
 const LIST_KEY: &str = "list.json";
 const SETTINGS_KEY: &str = "settings.json";
 
+// dioxus re-exports the same webview crate under two names, one per feature.
+#[cfg(all(feature = "desktop", not(feature = "mobile")))]
+use dioxus::desktop as webview;
+#[cfg(feature = "mobile")]
+use dioxus::mobile as webview;
+
 fn main() {
     #[cfg(feature = "desktop")]
     {
-        use dioxus::desktop::{Config, WindowBuilder};
         // GTK ignores xdg-decoration, so a tiling WM cannot remove the title bar itself.
-        let window = WindowBuilder::new()
+        let window = webview::WindowBuilder::new()
             .with_decorations(false)
             .with_title("1kauf");
         dioxus::LaunchBuilder::desktop()
-            .with_cfg(Config::new().with_window(window))
+            .with_cfg(webview_config().with_window(window))
             .launch(App);
     }
-    #[cfg(not(feature = "desktop"))]
+    #[cfg(all(feature = "mobile", not(feature = "desktop")))]
+    dioxus::LaunchBuilder::mobile()
+        .with_cfg(webview_config())
+        .launch(App);
+    #[cfg(not(any(feature = "desktop", feature = "mobile")))]
     dioxus::launch(App);
+}
+
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+fn webview_config() -> webview::Config {
+    // Release builds otherwise preventDefault every contextmenu event, taking the
+    // long-press paste menu with it.
+    webview::Config::new().with_disable_context_menu(false)
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
