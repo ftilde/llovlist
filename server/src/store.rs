@@ -53,12 +53,11 @@ mod tests {
     fn lists_survive_a_restart() {
         let dir = tempfile::tempdir().unwrap();
         let mut local = Lists::default();
+        let list = ListName::new("home").unwrap();
+        let key = local.item_key_at_end(DeviceId::new(1), &list);
         local.edit(
             DeviceId::new(1),
-            Edit::add_item(
-                ListName::new("home").unwrap(),
-                ItemName::new("Milch").unwrap(),
-            ),
+            Edit::add_item(list, ItemName::new("Milch").unwrap(), key),
         );
 
         Store::open(dir.path().to_owned())

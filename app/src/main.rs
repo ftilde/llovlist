@@ -93,8 +93,23 @@ fn undo(mut session: Signal<Session>) {
 fn add_item(session: Signal<Session>, list: ListName, mut draft: Signal<String>) {
     let name = ItemName::new(&draft.read()).ok();
     if let Some(name) = name {
-        apply(session, Edit::add_item(list, name));
+        let key = session.read().item_key_at_end(&list);
+        apply(session, Edit::add_item(list, name, key));
         draft.set(String::new());
+    }
+}
+
+fn move_item(session: Signal<Session>, list: &ListName, name: &ItemName, offset: isize) {
+    let key = session.read().item_key_for_move(list, name, offset);
+    if let Some(key) = key {
+        apply(
+            session,
+            Edit::MoveItem {
+                list: list.clone(),
+                name: name.clone(),
+                key,
+            },
+        );
     }
 }
 
@@ -105,9 +120,29 @@ fn create_list(
 ) {
     let list = ListName::new(&draft.read()).ok();
     if let Some(list) = list {
-        apply(session, Edit::CreateList { list: list.clone() });
+        let key = session.read().key_at_end();
+        apply(
+            session,
+            Edit::CreateList {
+                list: list.clone(),
+                key,
+            },
+        );
         current.set(Some(list));
         draft.set(String::new());
+    }
+}
+
+fn move_list(session: Signal<Session>, list: &ListName, offset: isize) {
+    let key = session.read().key_for_move(list, offset);
+    if let Some(key) = key {
+        apply(
+            session,
+            Edit::MoveList {
+                list: list.clone(),
+                key,
+            },
+        );
     }
 }
 
@@ -220,6 +255,26 @@ fn App() -> Element {
                         }
                     },
                 }
+                if let Some(list) = selected.clone() {
+                    div { class: "reorder",
+                        button {
+                            title: "move up",
+                            onclick: {
+                                let list = list.clone();
+                                move |_| move_list(session, &list, -1)
+                            },
+                            "↑"
+                        }
+                        button {
+                            title: "move down",
+                            onclick: {
+                                let list = list.clone();
+                                move |_| move_list(session, &list, 1)
+                            },
+                            "↓"
+                        }
+                    }
+                }
             }
 
             main {
@@ -258,6 +313,7 @@ fn App() -> Element {
                                 list: list.clone(),
                                 name,
                                 tags,
+                                session,
                                 on_edit: move |edit| apply(session, edit),
                             }
                         }
@@ -298,6 +354,7 @@ fn ItemRow(
     list: ListName,
     name: ItemName,
     tags: BTreeSet<Tag>,
+    session: Signal<Session>,
     on_edit: EventHandler<Edit>,
 ) -> Element {
     let mut adding = use_signal(|| false);
@@ -305,6 +362,24 @@ fn ItemRow(
 
     rsx! {
         li { class: "item",
+            div { class: "shift",
+                button {
+                    title: "move up",
+                    onclick: {
+                        let (list, name) = (list.clone(), name.clone());
+                        move |_| move_item(session, &list, &name, -1)
+                    },
+                    "↑"
+                }
+                button {
+                    title: "move down",
+                    onclick: {
+                        let (list, name) = (list.clone(), name.clone());
+                        move |_| move_item(session, &list, &name, 1)
+                    },
+                    "↓"
+                }
+            }
             button {
                 class: "tick",
                 title: "got it",

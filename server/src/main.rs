@@ -107,9 +107,11 @@ mod tests {
 
     fn lists_with(device: u64, list: &str, item: &str) -> Lists {
         let mut lists = Lists::default();
+        let list = ListName::new(list).unwrap();
+        let key = lists.item_key_at_end(DeviceId::new(device), &list);
         lists.edit(
             DeviceId::new(device),
-            Edit::add_item(ListName::new(list).unwrap(), ItemName::new(item).unwrap()),
+            Edit::add_item(list, ItemName::new(item).unwrap(), key),
         );
         lists
     }

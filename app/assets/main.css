@@ -116,6 +116,17 @@ input {
   font-size: 0.85rem;
 }
 
+.reorder {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.reorder button {
+  flex: 1 1 0;
+  min-height: 2rem;
+  padding: 0;
+}
+
 main {
   flex: 1 1 auto;
   min-width: 0;
@@ -166,6 +177,21 @@ main {
   align-items: center;
   padding: 0.4rem 0;
   border-bottom: 1px solid var(--line);
+}
+
+.shift {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.shift button {
+  min-height: 1.2rem;
+  width: 1.6rem;
+  padding: 0;
+  font-size: 0.7rem;
+  line-height: 1;
+  color: var(--muted);
 }
 
 .tick {
