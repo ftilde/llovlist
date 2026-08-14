@@ -5,7 +5,7 @@ edition.workspace = true
 
 [dependencies]
 axum = "0.8"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 getrandom = "0.3"
 hex = "0.4"
 kauf-core.workspace = true

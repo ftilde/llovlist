@@ -26,7 +26,8 @@ enum Command {
     Serve {
         #[arg(long, default_value = "127.0.0.1:8080")]
         addr: SocketAddr,
-        #[arg(long)]
+        // Via the environment by preference: an argument would be visible in /proc.
+        #[arg(long, env = "KAUF_TOKEN_HASH")]
         token_hash: TokenHash,
         #[arg(long, default_value = "lists")]
         state_dir: PathBuf,
