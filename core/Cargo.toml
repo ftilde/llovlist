@@ -1,5 +1,5 @@
 [package]
-name = "kauf-core"
+name = "llovlist-core"
 version.workspace = true
 edition.workspace = true
 

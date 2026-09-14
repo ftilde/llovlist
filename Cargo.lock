@@ -2480,50 +2480,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kauf-app"
-version = "0.1.0"
-dependencies = [
- "dioxus",
- "dirs",
- "getrandom 0.3.4",
- "jni 0.21.1",
- "kauf-core",
- "ndk-context",
- "reqwest",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "kauf-core"
-version = "0.1.0"
-dependencies = [
- "crdts",
- "proptest",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "kauf-server"
-version = "0.1.0"
-dependencies = [
- "axum",
- "clap",
- "getrandom 0.3.4",
- "hex",
- "http-body-util",
- "kauf-core",
- "serde",
- "serde_json",
- "sha2",
- "subtle",
- "tempfile",
- "tokio",
- "tower",
-]
-
-[[package]]
 name = "keyboard-types"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2684,6 +2640,50 @@ name = "litemap"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
+
+[[package]]
+name = "llovlist-app"
+version = "0.1.0"
+dependencies = [
+ "dioxus",
+ "dirs",
+ "getrandom 0.3.4",
+ "jni 0.21.1",
+ "llovlist-core",
+ "ndk-context",
+ "reqwest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "llovlist-core"
+version = "0.1.0"
+dependencies = [
+ "crdts",
+ "proptest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "llovlist-server"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clap",
+ "getrandom 0.3.4",
+ "hex",
+ "http-body-util",
+ "llovlist-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tempfile",
+ "tokio",
+ "tower",
+]
 
 [[package]]
 name = "lock_api"

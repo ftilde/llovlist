@@ -1,5 +1,5 @@
 [package]
-name = "kauf-server"
+name = "llovlist-server"
 version.workspace = true
 edition.workspace = true
 
@@ -8,7 +8,7 @@ axum = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
 getrandom = "0.3"
 hex = "0.4"
-kauf-core.workspace = true
+llovlist-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"

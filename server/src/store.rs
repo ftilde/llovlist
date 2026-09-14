@@ -3,7 +3,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use kauf_core::Lists;
+use llovlist_core::Lists;
 
 pub struct Store {
     path: PathBuf,
@@ -45,7 +45,7 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
-    use kauf_core::{DeviceId, Edit, ItemName, ListName};
+    use llovlist_core::{DeviceId, Edit, ItemName, ListName};
 
     use super::*;
 

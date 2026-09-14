@@ -11,7 +11,7 @@ use axum::extract::{FromRef, State};
 use axum::http::StatusCode;
 use axum::routing::post;
 use clap::Parser;
-use kauf_core::Lists;
+use llovlist_core::Lists;
 
 use auth::{Authenticated, Token, TokenHash};
 use store::Store;
@@ -24,7 +24,7 @@ enum Command {
         #[arg(long, default_value = "127.0.0.1:8080")]
         addr: SocketAddr,
         // Via the environment by preference: an argument would be visible in /proc.
-        #[arg(long, env = "KAUF_TOKEN_HASH")]
+        #[arg(long, env = "LLOVLIST_TOKEN_HASH")]
         token_hash: TokenHash,
         #[arg(long, default_value = "lists")]
         state_dir: PathBuf,
@@ -91,7 +91,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
-    use kauf_core::{DeviceId, Edit, ItemName, ListName};
+    use llovlist_core::{DeviceId, Edit, ItemName, ListName};
     use tower::ServiceExt;
 
     use super::*;

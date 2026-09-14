@@ -46,5 +46,5 @@ fn directory() -> PathBuf {
 fn directory() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(std::env::temp_dir)
-        .join("1kauf")
+        .join("llovlist")
 }

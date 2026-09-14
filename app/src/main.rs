@@ -4,7 +4,7 @@ mod sync;
 use std::collections::BTreeSet;
 
 use dioxus::prelude::*;
-use kauf_core::{DeviceId, Edit, ItemName, ListName, Lists, Session, Tag};
+use llovlist_core::{DeviceId, Edit, ItemName, ListName, Lists, Session, Tag};
 use serde::{Deserialize, Serialize};
 
 const CSS: &str = include_str!("../assets/main.css");
@@ -23,7 +23,7 @@ fn main() {
         // GTK ignores xdg-decoration, so a tiling WM cannot remove the title bar itself.
         let window = webview::WindowBuilder::new()
             .with_decorations(false)
-            .with_title("1kauf");
+            .with_title("llovlist");
         dioxus::LaunchBuilder::desktop()
             .with_cfg(webview_config().with_window(window))
             .launch(App);
@@ -369,7 +369,7 @@ fn App() -> Element {
     rsx! {
         document::Style { {CSS} }
         header {
-            h1 { "1kauf" }
+            h1 { "llovlist" }
             button {
                 disabled: !can_undo,
                 onclick: {

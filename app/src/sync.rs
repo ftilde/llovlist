@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use kauf_core::Lists;
+use llovlist_core::Lists;
 
 // Without this a firewalled host looks like a hang rather than a failure.
 const TIMEOUT: Duration = Duration::from_secs(10);

@@ -1,11 +1,11 @@
 [application]
-name = "1kauf"
+name = "llovlist"
 # Sets the NDK API level; [android] min_sdk sets the manifest. Different keys, different
 # defaults, so both are needed or the native library outruns the declared minimum.
 android_min_sdk_version = 28
 
 [bundle]
-identifier = "com.ftilde.kauf"
+identifier = "com.ftilde.llovlist"
 
 [android]
 min_sdk = 28

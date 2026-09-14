@@ -1,5 +1,5 @@
 {
-  description = "Android SDK/NDK for building the 1kauf app";
+  description = "Android SDK/NDK for building the llovlist app";
 
   # Pinned to a commit, not a branch: later 25.11 revisions make build-tools pull an
   # i686-linux dependency that cannot build without 32-bit support.

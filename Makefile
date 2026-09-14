@@ -3,9 +3,9 @@ export
 
 ADDR ?= 0.0.0.0:8137
 LISTS ?= lists
-PACKAGE := com.ftilde.kauf
+PACKAGE := com.ftilde.llovlist
 ACTIVITY := $(PACKAGE)/dev.dioxus.main.MainActivity
-APK := target/dx/1kauf/release/android/app/app/build/outputs/apk/debug/app-debug.apk
+APK := target/dx/llovlist/release/android/app/app/build/outputs/apk/debug/app-debug.apk
 
 # `path:` because a flake ref on a git repo only sees committed files, and it must point
 # at nix/ alone: `path:` copies its target into the store unfiltered, target/ included.
@@ -22,15 +22,15 @@ help:
 	@echo "make check     fmt, clippy and tests"
 
 token:
-	@cargo run -q -p kauf-server --release -- gen-token
+	@cargo run -q -p llovlist-server --release -- gen-token
 	@echo
-	@echo "put the hash in .env as KAUF_TOKEN_HASH, give the token to each client"
+	@echo "put the hash in .env as LLOVLIST_TOKEN_HASH, give the token to each client"
 
 server: require-token
-	cargo run -p kauf-server --release -- serve --addr $(ADDR) --state-dir $(LISTS)
+	cargo run -p llovlist-server --release -- serve --addr $(ADDR) --state-dir $(LISTS)
 
 desktop:
-	cargo run -p kauf-app --features desktop --release
+	cargo run -p llovlist-app --features desktop --release
 
 apk:
 	cd app && $(NIX) dx build --platform android --release --target aarch64-linux-android
@@ -47,7 +47,7 @@ check:
 	cargo test
 
 require-token:
-	@test -n "$(KAUF_TOKEN_HASH)" || { echo "KAUF_TOKEN_HASH is not set; run 'make token' and put the hash in .env"; exit 1; }
+	@test -n "$(LLOVLIST_TOKEN_HASH)" || { echo "LLOVLIST_TOKEN_HASH is not set; run 'make token' and put the hash in .env"; exit 1; }
 
 clean-lists:
 	rm -rf $(LISTS)

@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use kauf_core::{DeviceId, Edit, ItemName, ListName, Lists, Tag};
+use llovlist_core::{DeviceId, Edit, ItemName, ListName, Lists, Tag};
 
 const ALICE: DeviceId = DeviceId::new(1);
 const BOB: DeviceId = DeviceId::new(2);
