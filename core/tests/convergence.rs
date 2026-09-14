@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use llovlist_core::{DeviceId, Edit, ItemName, ListName, Lists, Tag};
+use llovlist_core::{DeviceId, Edit, Lists, TrimStr};
 use proptest::prelude::*;
 
 const REPLICAS: usize = 3;
@@ -9,20 +9,20 @@ const REPLICAS: usize = 3;
 // each replica turns them into edits itself -- as the UI does.
 #[derive(Debug, Clone)]
 enum Action {
-    CreateList(ListName),
-    RemoveList(ListName),
-    MoveListBefore(ListName, usize),
-    AddItem(ListName, ItemName),
-    RemoveItem(ListName, ItemName),
-    MoveItemBefore(ListName, ItemName, usize),
-    AddTag(ListName, ItemName, Tag),
-    RemoveTag(ListName, ItemName, Tag),
+    CreateList(TrimStr),
+    RemoveList(TrimStr),
+    MoveListBefore(TrimStr, usize),
+    AddItem(TrimStr, TrimStr),
+    RemoveItem(TrimStr, TrimStr),
+    MoveItemBefore(TrimStr, TrimStr, usize),
+    AddTag(TrimStr, TrimStr, TrimStr),
+    RemoveTag(TrimStr, TrimStr, TrimStr),
 }
 
 fn any_action() -> impl Strategy<Value = Action> {
-    let list = (0u8..3).prop_map(|i| ListName::new(&format!("list{i}")).unwrap());
-    let name = (0u8..3).prop_map(|i| ItemName::new(&format!("item{i}")).unwrap());
-    let tag = (0u8..3).prop_map(|i| Tag::new(&format!("tag{i}")).unwrap());
+    let list = (0u8..3).prop_map(|i| TrimStr::new(&format!("list{i}")).unwrap());
+    let name = (0u8..3).prop_map(|i| TrimStr::new(&format!("item{i}")).unwrap());
+    let tag = (0u8..3).prop_map(|i| TrimStr::new(&format!("tag{i}")).unwrap());
     prop_oneof![
         list.clone().prop_map(Action::CreateList),
         list.clone().prop_map(Action::RemoveList),
@@ -58,7 +58,7 @@ fn to_edit(lists: &Lists, by: DeviceId, action: Action) -> Edit {
         }
         Action::RemoveItem(list, name) => Edit::RemoveItem { list, name },
         Action::MoveItemBefore(list, name, at) => {
-            let items: Vec<ItemName> = lists
+            let items: Vec<TrimStr> = lists
                 .items(&list)
                 .into_iter()
                 .map(|(name, _)| name)
@@ -76,7 +76,7 @@ fn to_edit(lists: &Lists, by: DeviceId, action: Action) -> Edit {
     }
 }
 
-type View = Vec<(ListName, Vec<(ItemName, BTreeSet<Tag>)>)>;
+type View = Vec<(TrimStr, Vec<(TrimStr, BTreeSet<TrimStr>)>)>;
 
 // names() and items() are both ordered, so comparing views compares the order every
 // replica shows, not just the contents.

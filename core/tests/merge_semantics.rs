@@ -1,27 +1,27 @@
 use std::collections::BTreeSet;
 
-use llovlist_core::{DeviceId, Edit, ItemName, ListName, Lists, Tag};
+use llovlist_core::{DeviceId, Edit, Lists, TrimStr};
 
 const ALICE: DeviceId = DeviceId::new(1);
 const BOB: DeviceId = DeviceId::new(2);
 
-fn list(raw: &str) -> ListName {
-    ListName::new(raw).unwrap()
+fn list(raw: &str) -> TrimStr {
+    TrimStr::new(raw).unwrap()
 }
 
-fn name(raw: &str) -> ItemName {
-    ItemName::new(raw).unwrap()
+fn name(raw: &str) -> TrimStr {
+    TrimStr::new(raw).unwrap()
 }
 
-fn tag(raw: &str) -> Tag {
-    Tag::new(raw).unwrap()
+fn tag(raw: &str) -> TrimStr {
+    TrimStr::new(raw).unwrap()
 }
 
-fn tags(raw: &[&str]) -> BTreeSet<Tag> {
+fn tags(raw: &[&str]) -> BTreeSet<TrimStr> {
     raw.iter().map(|raw| tag(raw)).collect()
 }
 
-fn home() -> ListName {
+fn home() -> TrimStr {
     list("home")
 }
 
@@ -32,12 +32,12 @@ fn create(lists: &Lists, by: DeviceId, name: &str) -> Edit {
     }
 }
 
-fn add(lists: &Lists, by: DeviceId, in_list: ListName, item: &str) -> Edit {
+fn add(lists: &Lists, by: DeviceId, in_list: TrimStr, item: &str) -> Edit {
     let key = lists.item_key_at_end(by, &in_list);
     Edit::add_item(in_list, name(item), key)
 }
 
-fn add_tag(list: ListName, item: &str, value: &str) -> Edit {
+fn add_tag(list: TrimStr, item: &str, value: &str) -> Edit {
     Edit::AddTag {
         list,
         name: name(item),
@@ -45,14 +45,14 @@ fn add_tag(list: ListName, item: &str, value: &str) -> Edit {
     }
 }
 
-fn remove_item(list: ListName, item: &str) -> Edit {
+fn remove_item(list: TrimStr, item: &str) -> Edit {
     Edit::RemoveItem {
         list,
         name: name(item),
     }
 }
 
-fn item_names(lists: &Lists, list: &ListName) -> Vec<ItemName> {
+fn item_names(lists: &Lists, list: &TrimStr) -> Vec<TrimStr> {
     lists
         .items(list)
         .into_iter()

@@ -2,7 +2,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 
 use crdts::identifier::Identifier;
-use crdts::{CmRDT, CvRDT, MVReg, Map, Orswot, VClock, map};
+use crdts::{map, CmRDT, CvRDT, MVReg, Map, Orswot, VClock};
 use serde::{Deserialize, Serialize};
 
 // Two replicas sharing an id mint the same dots and silently drop each other's entries.
@@ -36,54 +36,36 @@ fn trimmed(raw: &str) -> Result<String, Blank> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct ListName(String);
+pub struct TrimStr(String);
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct ItemName(String);
+impl TrimStr {
+    pub fn new(raw: &str) -> Result<Self, Blank> {
+        trimmed(raw).map(Self)
+    }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct Tag(String);
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+impl TryFrom<String> for TrimStr {
+    type Error = Blank;
 
-macro_rules! trimmed_newtype {
-    ($type:ident) => {
-        impl $type {
-            pub fn new(raw: &str) -> Result<Self, Blank> {
-                trimmed(raw).map(Self)
-            }
-
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
-        }
-
-        impl TryFrom<String> for $type {
-            type Error = Blank;
-
-            fn try_from(raw: String) -> Result<Self, Blank> {
-                Self::new(&raw)
-            }
-        }
-
-        impl From<$type> for String {
-            fn from(value: $type) -> Self {
-                value.0
-            }
-        }
-
-        impl fmt::Display for $type {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str(&self.0)
-            }
-        }
-    };
+    fn try_from(raw: String) -> Result<Self, Blank> {
+        Self::new(&raw)
+    }
 }
 
-trimmed_newtype!(ListName);
-trimmed_newtype!(ItemName);
-trimmed_newtype!(Tag);
+impl From<TrimStr> for String {
+    fn from(value: TrimStr) -> Self {
+        value.0
+    }
+}
+
+impl fmt::Display for TrimStr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 /// Sort position, dense so that a move writes one key and never renumbers its neighbours.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -94,45 +76,45 @@ pub enum Edit {
     // Keys are computed by the caller, not derived on apply, so replaying an edit during
     // undo cannot land something somewhere the user never chose.
     CreateList {
-        list: ListName,
+        list: TrimStr,
         key: OrderKey,
     },
     MoveList {
-        list: ListName,
+        list: TrimStr,
         key: OrderKey,
     },
     RemoveList {
-        list: ListName,
+        list: TrimStr,
     },
     AddItem {
-        list: ListName,
-        name: ItemName,
-        tags: BTreeSet<Tag>,
+        list: TrimStr,
+        name: TrimStr,
+        tags: BTreeSet<TrimStr>,
         key: OrderKey,
     },
     MoveItem {
-        list: ListName,
-        name: ItemName,
+        list: TrimStr,
+        name: TrimStr,
         key: OrderKey,
     },
     RemoveItem {
-        list: ListName,
-        name: ItemName,
+        list: TrimStr,
+        name: TrimStr,
     },
     AddTag {
-        list: ListName,
-        name: ItemName,
-        tag: Tag,
+        list: TrimStr,
+        name: TrimStr,
+        tag: TrimStr,
     },
     RemoveTag {
-        list: ListName,
-        name: ItemName,
-        tag: Tag,
+        list: TrimStr,
+        name: TrimStr,
+        tag: TrimStr,
     },
 }
 
 impl Edit {
-    pub fn add_item(list: ListName, name: ItemName, key: OrderKey) -> Self {
+    pub fn add_item(list: TrimStr, name: TrimStr, key: OrderKey) -> Self {
         Self::AddItem {
             list,
             name,
@@ -142,22 +124,22 @@ impl Edit {
     }
 }
 
-type Items = Map<ItemName, Orswot<Tag, DeviceId>, DeviceId>;
+type Items = Map<TrimStr, Orswot<TrimStr, DeviceId>, DeviceId>;
 type Positions<K> = Map<K, MVReg<OrderKey, DeviceId>, DeviceId>;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lists {
-    lists: Map<ListName, Items, DeviceId>,
+    lists: Map<TrimStr, Items, DeviceId>,
     // Sibling maps rather than fields on each entry, so every value stays a single CRDT
     // and needs no wrapper. Removals have to clear these explicitly: reset_remove only
     // reaches registers nested inside the entry being removed.
-    order: Positions<ListName>,
-    item_order: Map<ListName, Positions<ItemName>, DeviceId>,
+    order: Positions<TrimStr>,
+    item_order: Map<TrimStr, Positions<TrimStr>, DeviceId>,
 }
 
 impl Lists {
-    pub fn names(&self) -> Vec<ListName> {
-        let mut names: Vec<ListName> = self.lists.keys().map(|entry| entry.val.clone()).collect();
+    pub fn names(&self) -> Vec<TrimStr> {
+        let mut names: Vec<TrimStr> = self.lists.keys().map(|entry| entry.val.clone()).collect();
         names.sort_by_cached_key(|name| {
             let key = self.order_key(name);
             (key.is_none(), key, name.clone())
@@ -165,8 +147,8 @@ impl Lists {
         names
     }
 
-    pub fn items(&self, list: &ListName) -> Vec<(ItemName, BTreeSet<Tag>)> {
-        let mut items: Vec<(ItemName, BTreeSet<Tag>)> = self
+    pub fn items(&self, list: &TrimStr) -> Vec<(TrimStr, BTreeSet<TrimStr>)> {
+        let mut items: Vec<(TrimStr, BTreeSet<TrimStr>)> = self
             .lists
             .get(list)
             .val
@@ -188,11 +170,11 @@ impl Lists {
     }
 
     /// Lowest of the positions written for `list`, so concurrent moves still agree.
-    pub fn order_key(&self, list: &ListName) -> Option<OrderKey> {
+    pub fn order_key(&self, list: &TrimStr) -> Option<OrderKey> {
         Self::lowest(self.order.get(list).val.as_ref())
     }
 
-    pub fn item_key(&self, list: &ListName, name: &ItemName) -> Option<OrderKey> {
+    pub fn item_key(&self, list: &TrimStr, name: &TrimStr) -> Option<OrderKey> {
         let positions = self.item_order.get(list).val?;
         Self::lowest(positions.get(name).val.as_ref())
     }
@@ -204,8 +186,8 @@ impl Lists {
     pub fn key_between(
         &self,
         by: DeviceId,
-        after: Option<&ListName>,
-        before: Option<&ListName>,
+        after: Option<&TrimStr>,
+        before: Option<&TrimStr>,
     ) -> OrderKey {
         let lower = after.and_then(|list| self.order_key(list));
         let upper = before.and_then(|list| self.order_key(list));
@@ -215,9 +197,9 @@ impl Lists {
     pub fn item_key_between(
         &self,
         by: DeviceId,
-        list: &ListName,
-        after: Option<&ItemName>,
-        before: Option<&ItemName>,
+        list: &TrimStr,
+        after: Option<&TrimStr>,
+        before: Option<&TrimStr>,
     ) -> OrderKey {
         let lower = after.and_then(|name| self.item_key(list, name));
         let upper = before.and_then(|name| self.item_key(list, name));
@@ -236,13 +218,13 @@ impl Lists {
         self.key_between(by, self.names().last(), None)
     }
 
-    pub fn item_key_at_end(&self, by: DeviceId, list: &ListName) -> OrderKey {
+    pub fn item_key_at_end(&self, by: DeviceId, list: &TrimStr) -> OrderKey {
         let items = self.items(list);
         self.item_key_between(by, list, items.last().map(|(name, _)| name), None)
     }
 
     /// Position putting `list` at `slot` of the order with `list` taken out.
-    pub fn key_for_slot(&self, by: DeviceId, list: &ListName, slot: usize) -> Option<OrderKey> {
+    pub fn key_for_slot(&self, by: DeviceId, list: &TrimStr, slot: usize) -> Option<OrderKey> {
         let (after, before) = neighbours_at(self.names(), list, slot)?;
         Some(self.key_between(by, after.as_ref(), before.as_ref()))
     }
@@ -250,8 +232,8 @@ impl Lists {
     pub fn item_key_for_slot(
         &self,
         by: DeviceId,
-        list: &ListName,
-        name: &ItemName,
+        list: &TrimStr,
+        name: &TrimStr,
         slot: usize,
     ) -> Option<OrderKey> {
         let (after, before) = neighbours_at(self.item_names(list), name, slot)?;
@@ -259,7 +241,7 @@ impl Lists {
     }
 
     /// Position moving `list` `offset` places, or `None` if it cannot move that far.
-    pub fn key_for_move(&self, by: DeviceId, list: &ListName, offset: isize) -> Option<OrderKey> {
+    pub fn key_for_move(&self, by: DeviceId, list: &TrimStr, offset: isize) -> Option<OrderKey> {
         let slot = step(&self.names(), list, offset)?;
         self.key_for_slot(by, list, slot)
     }
@@ -267,30 +249,30 @@ impl Lists {
     pub fn item_key_for_move(
         &self,
         by: DeviceId,
-        list: &ListName,
-        name: &ItemName,
+        list: &TrimStr,
+        name: &TrimStr,
         offset: isize,
     ) -> Option<OrderKey> {
         let slot = step(&self.item_names(list), name, offset)?;
         self.item_key_for_slot(by, list, name, slot)
     }
 
-    pub fn item_names(&self, list: &ListName) -> Vec<ItemName> {
+    pub fn item_names(&self, list: &TrimStr) -> Vec<TrimStr> {
         self.items(list).into_iter().map(|(name, _)| name).collect()
     }
 
-    pub fn has(&self, list: &ListName) -> bool {
+    pub fn has(&self, list: &TrimStr) -> bool {
         self.lists.get(list).val.is_some()
     }
 
-    pub fn contains(&self, list: &ListName, name: &ItemName) -> bool {
+    pub fn contains(&self, list: &TrimStr, name: &TrimStr) -> bool {
         self.lists
             .get(list)
             .val
             .is_some_and(|items| items.get(name).val.is_some())
     }
 
-    pub fn tags(&self, list: &ListName, name: &ItemName) -> BTreeSet<Tag> {
+    pub fn tags(&self, list: &TrimStr, name: &TrimStr) -> BTreeSet<TrimStr> {
         self.lists
             .get(list)
             .val
@@ -388,7 +370,7 @@ impl Lists {
         self.lists.apply(op);
     }
 
-    fn write_list_key(&mut self, by: DeviceId, list: ListName, key: OrderKey) {
+    fn write_list_key(&mut self, by: DeviceId, list: TrimStr, key: OrderKey) {
         let ctx = self.order.read_ctx().derive_add_ctx(by);
         let op = self
             .order
@@ -396,7 +378,7 @@ impl Lists {
         self.order.apply(op);
     }
 
-    fn write_item_key(&mut self, by: DeviceId, list: ListName, name: ItemName, key: OrderKey) {
+    fn write_item_key(&mut self, by: DeviceId, list: TrimStr, name: TrimStr, key: OrderKey) {
         let ctx = self.item_order.read_ctx().derive_add_ctx(by);
         let op = self.item_order.update(list, ctx, |positions, ctx| {
             positions.update(name, ctx, |position, ctx| position.write(key, ctx))
@@ -404,7 +386,7 @@ impl Lists {
         self.item_order.apply(op);
     }
 
-    fn clear_item_key(&mut self, by: DeviceId, list: ListName, name: ItemName) {
+    fn clear_item_key(&mut self, by: DeviceId, list: TrimStr, name: TrimStr) {
         let Some(positions) = self.item_order.get(&list).val else {
             return;
         };
@@ -453,7 +435,7 @@ fn step<T: PartialEq>(order: &[T], subject: &T, offset: isize) -> Option<usize> 
 
 // Registering a list needs an op for its contents; the outer Up carries the dot that
 // makes the entry exist, so this one only has to be harmless.
-fn inert() -> map::Op<ItemName, Orswot<Tag, DeviceId>, DeviceId> {
+fn inert() -> map::Op<TrimStr, Orswot<TrimStr, DeviceId>, DeviceId> {
     map::Op::Rm {
         clock: VClock::new(),
         keyset: BTreeSet::new(),
@@ -464,7 +446,7 @@ fn inert() -> map::Op<ItemName, Orswot<Tag, DeviceId>, DeviceId> {
 pub struct Session {
     device: DeviceId,
     lists: Lists,
-    history: HashMap<ListName, Vec<Vec<Edit>>>,
+    history: HashMap<TrimStr, Vec<Vec<Edit>>>,
     deleted: Vec<Vec<Edit>>,
 }
 
@@ -482,7 +464,7 @@ impl Session {
         &self.lists
     }
 
-    pub fn can_undo(&self, list: &ListName) -> bool {
+    pub fn can_undo(&self, list: &TrimStr) -> bool {
         self.history
             .get(list)
             .is_some_and(|stack| !stack.is_empty())
@@ -496,32 +478,32 @@ impl Session {
         self.lists.key_at_end(self.device)
     }
 
-    pub fn item_key_at_end(&self, list: &ListName) -> OrderKey {
+    pub fn item_key_at_end(&self, list: &TrimStr) -> OrderKey {
         self.lists.item_key_at_end(self.device, list)
     }
 
-    pub fn key_for_move(&self, list: &ListName, offset: isize) -> Option<OrderKey> {
+    pub fn key_for_move(&self, list: &TrimStr, offset: isize) -> Option<OrderKey> {
         self.lists.key_for_move(self.device, list, offset)
     }
 
     pub fn item_key_for_move(
         &self,
-        list: &ListName,
-        name: &ItemName,
+        list: &TrimStr,
+        name: &TrimStr,
         offset: isize,
     ) -> Option<OrderKey> {
         self.lists
             .item_key_for_move(self.device, list, name, offset)
     }
 
-    pub fn key_for_slot(&self, list: &ListName, slot: usize) -> Option<OrderKey> {
+    pub fn key_for_slot(&self, list: &TrimStr, slot: usize) -> Option<OrderKey> {
         self.lists.key_for_slot(self.device, list, slot)
     }
 
     pub fn item_key_for_slot(
         &self,
-        list: &ListName,
-        name: &ItemName,
+        list: &TrimStr,
+        name: &TrimStr,
         slot: usize,
     ) -> Option<OrderKey> {
         self.lists.item_key_for_slot(self.device, list, name, slot)
@@ -553,7 +535,7 @@ impl Session {
         self.lists.edit(self.device, edit);
     }
 
-    pub fn undo(&mut self, list: &ListName) {
+    pub fn undo(&mut self, list: &TrimStr) {
         let Some(revert) = self.history.get_mut(list).and_then(Vec::pop) else {
             return;
         };
@@ -633,13 +615,13 @@ impl Session {
         }
     }
 
-    fn list_key(&self, list: &ListName) -> OrderKey {
+    fn list_key(&self, list: &TrimStr) -> OrderKey {
         self.lists
             .order_key(list)
             .unwrap_or_else(|| self.key_at_end())
     }
 
-    fn item_key(&self, list: &ListName, name: &ItemName) -> OrderKey {
+    fn item_key(&self, list: &TrimStr, name: &TrimStr) -> OrderKey {
         self.lists
             .item_key(list, name)
             .unwrap_or_else(|| self.item_key_at_end(list))
@@ -652,16 +634,16 @@ mod tests {
 
     const ALICE: DeviceId = DeviceId::new(1);
 
-    fn list(raw: &str) -> ListName {
-        ListName::new(raw).unwrap()
+    fn list(raw: &str) -> TrimStr {
+        TrimStr::new(raw).unwrap()
     }
 
-    fn name(raw: &str) -> ItemName {
-        ItemName::new(raw).unwrap()
+    fn name(raw: &str) -> TrimStr {
+        TrimStr::new(raw).unwrap()
     }
 
-    fn tag(raw: &str) -> Tag {
-        Tag::new(raw).unwrap()
+    fn tag(raw: &str) -> TrimStr {
+        TrimStr::new(raw).unwrap()
     }
 
     fn create(session: &Session, name: &str) -> Edit {
@@ -697,7 +679,7 @@ mod tests {
         session
     }
 
-    fn item_order(session: &Session) -> Vec<ItemName> {
+    fn item_order(session: &Session) -> Vec<TrimStr> {
         session
             .lists()
             .items(&list("home"))
@@ -777,11 +759,9 @@ mod tests {
         let session = home_with_items();
 
         // Three items, so slots 0..=2 exist once the dragged one is taken out.
-        assert!(
-            session
-                .item_key_for_slot(&list("home"), &name("kaffee"), 2)
-                .is_some()
-        );
+        assert!(session
+            .item_key_for_slot(&list("home"), &name("kaffee"), 2)
+            .is_some());
         assert_eq!(
             session.item_key_for_slot(&list("home"), &name("kaffee"), 3),
             None
@@ -989,11 +969,9 @@ mod tests {
         session.undo(&list("home"));
 
         assert!(!session.lists().contains(&list("home"), &name("milch")));
-        assert!(
-            session
-                .lists()
-                .contains(&list("baumarkt"), &name("schrauben"))
-        );
+        assert!(session
+            .lists()
+            .contains(&list("baumarkt"), &name("schrauben")));
         assert!(!session.can_undo(&list("home")));
         assert!(session.can_undo(&list("baumarkt")));
     }
