@@ -1,8 +1,9 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 
+use crdts::ctx::AddCtx;
 use crdts::identifier::Identifier;
-use crdts::{map, CmRDT, CvRDT, MVReg, Map, Orswot, VClock};
+use crdts::{CmRDT, CvRDT, MVReg, Map, Orswot, ResetRemove, VClock, map, mvreg};
 use serde::{Deserialize, Serialize};
 
 // Two replicas sharing an id mint the same dots and silently drop each other's entries.
@@ -124,63 +125,144 @@ impl Edit {
     }
 }
 
-type Items = Map<TrimStr, Orswot<TrimStr, DeviceId>, DeviceId>;
-type Positions<K> = Map<K, MVReg<OrderKey, DeviceId>, DeviceId>;
+type Tags = Orswot<TrimStr, DeviceId>;
+type Items = Map<TrimStr, Placed<Tags>, DeviceId>;
+type ListsOp = map::Op<TrimStr, Placed<Items>, DeviceId>;
+
+/// A CRDT and its sort position as one map value.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Placed<V> {
+    position: MVReg<OrderKey, DeviceId>,
+    inner: V,
+}
+
+impl<V> Placed<V> {
+    fn key(&self) -> Option<OrderKey> {
+        // Lowest of the concurrent writes, so every replica resolves a move the same way.
+        self.position.read().val.into_iter().min()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlacedOp<Op> {
+    position: Option<mvreg::Op<OrderKey, DeviceId>>,
+    inner: Option<Op>,
+}
+
+impl<Op> PlacedOp<Op> {
+    fn inner(op: Op) -> Self {
+        Self {
+            position: None,
+            inner: Some(op),
+        }
+    }
+
+    fn place(key: OrderKey, ctx: &AddCtx<DeviceId>) -> Self {
+        Self {
+            position: Some(put(key, ctx)),
+            inner: None,
+        }
+    }
+}
+
+fn put(key: OrderKey, ctx: &AddCtx<DeviceId>) -> mvreg::Op<OrderKey, DeviceId> {
+    mvreg::Op::Put {
+        clock: ctx.clock.clone(),
+        val: key,
+    }
+}
+
+impl<V: CmRDT> CmRDT for Placed<V> {
+    type Op = PlacedOp<V::Op>;
+    type Validation = V::Validation;
+
+    fn validate_op(&self, op: &Self::Op) -> Result<(), Self::Validation> {
+        op.inner
+            .as_ref()
+            .map_or(Ok(()), |op| self.inner.validate_op(op))
+    }
+
+    fn apply(&mut self, op: Self::Op) {
+        if let Some(op) = op.position {
+            self.position.apply(op);
+        }
+        if let Some(op) = op.inner {
+            self.inner.apply(op);
+        }
+    }
+}
+
+impl<V: CvRDT> CvRDT for Placed<V> {
+    type Validation = V::Validation;
+
+    fn validate_merge(&self, other: &Self) -> Result<(), Self::Validation> {
+        self.inner.validate_merge(&other.inner)
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.position.merge(other.position);
+        self.inner.merge(other.inner);
+    }
+}
+
+impl<V: ResetRemove<DeviceId>> ResetRemove<DeviceId> for Placed<V> {
+    fn reset_remove(&mut self, clock: &VClock<DeviceId>) {
+        self.position.reset_remove(clock);
+        self.inner.reset_remove(clock);
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lists {
-    lists: Map<TrimStr, Items, DeviceId>,
-    // Sibling maps rather than fields on each entry, so every value stays a single CRDT
-    // and needs no wrapper. Removals have to clear these explicitly: reset_remove only
-    // reaches registers nested inside the entry being removed.
-    order: Positions<TrimStr>,
-    item_order: Map<TrimStr, Positions<TrimStr>, DeviceId>,
+    lists: Map<TrimStr, Placed<Items>, DeviceId>,
+}
+
+/// Sorts by position, unpositioned entries last, ties by name.
+fn sort_key(key: Option<OrderKey>, name: &TrimStr) -> (bool, Option<OrderKey>, TrimStr) {
+    (key.is_none(), key, name.clone())
 }
 
 impl Lists {
     pub fn names(&self) -> Vec<TrimStr> {
         let mut names: Vec<TrimStr> = self.lists.keys().map(|entry| entry.val.clone()).collect();
-        names.sort_by_cached_key(|name| {
-            let key = self.order_key(name);
-            (key.is_none(), key, name.clone())
-        });
+        names.sort_by_cached_key(|name| sort_key(self.order_key(name), name));
         names
     }
 
     pub fn items(&self, list: &TrimStr) -> Vec<(TrimStr, BTreeSet<TrimStr>)> {
-        let mut items: Vec<(TrimStr, BTreeSet<TrimStr>)> = self
-            .lists
-            .get(list)
-            .val
-            .map(|items| {
-                items
-                    .iter()
-                    .map(|entry| {
-                        let (name, tags) = entry.val;
-                        (name.clone(), tags.read().val.into_iter().collect())
-                    })
-                    .collect()
+        let Some(list) = self.list(list) else {
+            return Vec::new();
+        };
+        let mut items: Vec<(Option<OrderKey>, TrimStr, BTreeSet<TrimStr>)> = list
+            .inner
+            .iter()
+            .map(|entry| {
+                let (name, item) = entry.val;
+                let tags = item.inner.read().val.into_iter().collect();
+                (item.key(), name.clone(), tags)
             })
-            .unwrap_or_default();
-        items.sort_by_cached_key(|(name, _)| {
-            let key = self.item_key(list, name);
-            (key.is_none(), key, name.clone())
-        });
+            .collect();
+        items.sort_by_cached_key(|(key, name, _)| sort_key(key.clone(), name));
         items
+            .into_iter()
+            .map(|(_, name, tags)| (name, tags))
+            .collect()
     }
 
-    /// Lowest of the positions written for `list`, so concurrent moves still agree.
+    fn list(&self, list: &TrimStr) -> Option<Placed<Items>> {
+        self.lists.get(list).val
+    }
+
+    fn item(&self, list: &TrimStr, name: &TrimStr) -> Option<Placed<Tags>> {
+        self.list(list)?.inner.get(name).val
+    }
+
     pub fn order_key(&self, list: &TrimStr) -> Option<OrderKey> {
-        Self::lowest(self.order.get(list).val.as_ref())
+        self.list(list)?.key()
     }
 
     pub fn item_key(&self, list: &TrimStr, name: &TrimStr) -> Option<OrderKey> {
-        let positions = self.item_order.get(list).val?;
-        Self::lowest(positions.get(name).val.as_ref())
-    }
-
-    fn lowest(positions: Option<&MVReg<OrderKey, DeviceId>>) -> Option<OrderKey> {
-        positions?.read().val.into_iter().min()
+        self.item(list, name)?.key()
     }
 
     pub fn key_between(
@@ -262,50 +344,38 @@ impl Lists {
     }
 
     pub fn has(&self, list: &TrimStr) -> bool {
-        self.lists.get(list).val.is_some()
+        self.list(list).is_some()
     }
 
     pub fn contains(&self, list: &TrimStr, name: &TrimStr) -> bool {
-        self.lists
-            .get(list)
-            .val
-            .is_some_and(|items| items.get(name).val.is_some())
+        self.item(list, name).is_some()
     }
 
     pub fn tags(&self, list: &TrimStr, name: &TrimStr) -> BTreeSet<TrimStr> {
-        self.lists
-            .get(list)
-            .val
-            .and_then(|items| items.get(name).val)
-            .map(|tags| tags.read().val.into_iter().collect())
+        self.item(list, name)
+            .map(|item| item.inner.read().val.into_iter().collect())
             .unwrap_or_default()
     }
 
     pub fn edit(&mut self, by: DeviceId, edit: Edit) {
+        let ctx = self.lists.read_ctx().derive_add_ctx(by);
         let op = match edit {
             Edit::CreateList { list, key } => {
-                let fresh = !self.has(&list);
-                let ctx = self.lists.read_ctx().derive_add_ctx(by);
-                let op = self.lists.update(list.clone(), ctx, |_, _| inert());
                 // Only when new, so re-creating an existing list does not move it.
-                if fresh {
-                    self.write_list_key(by, list, key);
-                }
-                op
+                let fresh = !self.has(&list);
+                self.lists.update(list, ctx, |_, ctx| PlacedOp {
+                    position: fresh.then(|| put(key, &ctx)),
+                    inner: None,
+                })
             }
             Edit::MoveList { list, key } => {
-                if self.has(&list) {
-                    self.write_list_key(by, list, key);
+                if !self.has(&list) {
+                    return;
                 }
-                return;
+                self.lists
+                    .update(list, ctx, |_, ctx| PlacedOp::place(key, &ctx))
             }
             Edit::RemoveList { list } => {
-                let order_ctx = self.order.get(&list).derive_rm_ctx();
-                let order_op = self.order.rm(list.clone(), order_ctx);
-                self.order.apply(order_op);
-                let items_ctx = self.item_order.get(&list).derive_rm_ctx();
-                let items_op = self.item_order.rm(list.clone(), items_ctx);
-                self.item_order.apply(items_op);
                 let ctx = self.lists.get(&list).derive_rm_ctx();
                 self.lists.rm(list, ctx)
             }
@@ -316,92 +386,57 @@ impl Lists {
                 key,
             } => {
                 let fresh = !self.contains(&list, &name);
-                let ctx = self.lists.read_ctx().derive_add_ctx(by);
-                let op = self.lists.update(list.clone(), ctx, |items, ctx| {
-                    // An empty `add_all` still registers the entry, so a tagless item exists.
-                    items.update(name.clone(), ctx, |item, ctx| item.add_all(tags, ctx))
-                });
-                if fresh {
-                    self.write_item_key(by, list, name, key);
-                }
-                op
-            }
-            Edit::MoveItem { list, name, key } => {
-                if self.contains(&list, &name) {
-                    self.write_item_key(by, list, name, key);
-                }
-                return;
-            }
-            Edit::RemoveItem { list, name } => {
-                let Some(items) = self.lists.get(&list).val else {
-                    return;
-                };
-                let rm_ctx = items.get(&name).derive_rm_ctx();
-                let ctx = self.lists.read_ctx().derive_add_ctx(by);
-                let op = self
-                    .lists
-                    .update(list.clone(), ctx, |items, _| items.rm(name.clone(), rm_ctx));
-                self.clear_item_key(by, list, name);
-                op
-            }
-            Edit::AddTag { list, name, tag } => {
-                let ctx = self.lists.read_ctx().derive_add_ctx(by);
-                self.lists.update(list, ctx, |items, ctx| {
-                    items.update(name, ctx, |tags, ctx| tags.add(tag, ctx))
+                self.update_item(list, name, ctx, |item, ctx| PlacedOp {
+                    position: fresh.then(|| put(key, &ctx)),
+                    inner: Some(item.inner.add_all(tags, ctx)),
                 })
             }
-            Edit::RemoveTag { list, name, tag } => {
-                let Some(tags) = self
-                    .lists
-                    .get(&list)
-                    .val
-                    .and_then(|items| items.get(&name).val)
-                else {
+            Edit::MoveItem { list, name, key } => {
+                if !self.contains(&list, &name) {
+                    return;
+                }
+                self.update_item(list, name, ctx, |_, ctx| PlacedOp::place(key, &ctx))
+            }
+            Edit::RemoveItem { list, name } => {
+                let Some(items) = self.list(&list) else {
                     return;
                 };
-                let rm_ctx = tags.contains(&tag).derive_rm_ctx();
-                let ctx = self.lists.read_ctx().derive_add_ctx(by);
-                self.lists.update(list, ctx, |items, ctx| {
-                    // Through `update`, not `rm`, so the item itself stays present.
-                    items.update(name, ctx, |tags, _| tags.rm(tag, rm_ctx))
+                let rm_ctx = items.inner.get(&name).derive_rm_ctx();
+                self.lists.update(list, ctx, |list, _| {
+                    PlacedOp::inner(list.inner.rm(name, rm_ctx))
+                })
+            }
+            Edit::AddTag { list, name, tag } => self.update_item(list, name, ctx, |item, ctx| {
+                PlacedOp::inner(item.inner.add(tag, ctx))
+            }),
+            Edit::RemoveTag { list, name, tag } => {
+                let Some(item) = self.item(&list, &name) else {
+                    return;
+                };
+                let rm_ctx = item.inner.contains(&tag).derive_rm_ctx();
+                // Through `update`, not `rm`, so the item itself stays present.
+                self.update_item(list, name, ctx, |item, _| {
+                    PlacedOp::inner(item.inner.rm(tag, rm_ctx))
                 })
             }
         };
         self.lists.apply(op);
     }
 
-    fn write_list_key(&mut self, by: DeviceId, list: TrimStr, key: OrderKey) {
-        let ctx = self.order.read_ctx().derive_add_ctx(by);
-        let op = self
-            .order
-            .update(list, ctx, |positions, ctx| positions.write(key, ctx));
-        self.order.apply(op);
-    }
-
-    fn write_item_key(&mut self, by: DeviceId, list: TrimStr, name: TrimStr, key: OrderKey) {
-        let ctx = self.item_order.read_ctx().derive_add_ctx(by);
-        let op = self.item_order.update(list, ctx, |positions, ctx| {
-            positions.update(name, ctx, |position, ctx| position.write(key, ctx))
-        });
-        self.item_order.apply(op);
-    }
-
-    fn clear_item_key(&mut self, by: DeviceId, list: TrimStr, name: TrimStr) {
-        let Some(positions) = self.item_order.get(&list).val else {
-            return;
-        };
-        let rm_ctx = positions.get(&name).derive_rm_ctx();
-        let ctx = self.item_order.read_ctx().derive_add_ctx(by);
-        let op = self
-            .item_order
-            .update(list, ctx, |positions, _| positions.rm(name, rm_ctx));
-        self.item_order.apply(op);
+    fn update_item(
+        &self,
+        list: TrimStr,
+        name: TrimStr,
+        ctx: AddCtx<DeviceId>,
+        f: impl FnOnce(&Placed<Tags>, AddCtx<DeviceId>) -> PlacedOp<<Tags as CmRDT>::Op>,
+    ) -> ListsOp {
+        self.lists.update(list, ctx, |list, ctx| {
+            PlacedOp::inner(list.inner.update(name, ctx, f))
+        })
     }
 
     pub fn merge(&mut self, other: Self) {
         self.lists.merge(other.lists);
-        self.order.merge(other.order);
-        self.item_order.merge(other.item_order);
     }
 }
 
@@ -431,15 +466,6 @@ fn step<T: PartialEq>(order: &[T], subject: &T, offset: isize) -> Option<usize> 
     let at = order.iter().position(|entry| entry == subject)?;
     let slot = usize::try_from(at as isize + offset).ok()?;
     (slot < order.len()).then_some(slot)
-}
-
-// Registering a list needs an op for its contents; the outer Up carries the dot that
-// makes the entry exist, so this one only has to be harmless.
-fn inert() -> map::Op<TrimStr, Orswot<TrimStr, DeviceId>, DeviceId> {
-    map::Op::Rm {
-        clock: VClock::new(),
-        keyset: BTreeSet::new(),
-    }
 }
 
 #[derive(Debug)]
@@ -759,9 +785,11 @@ mod tests {
         let session = home_with_items();
 
         // Three items, so slots 0..=2 exist once the dragged one is taken out.
-        assert!(session
-            .item_key_for_slot(&list("home"), &name("kaffee"), 2)
-            .is_some());
+        assert!(
+            session
+                .item_key_for_slot(&list("home"), &name("kaffee"), 2)
+                .is_some()
+        );
         assert_eq!(
             session.item_key_for_slot(&list("home"), &name("kaffee"), 3),
             None
@@ -969,9 +997,11 @@ mod tests {
         session.undo(&list("home"));
 
         assert!(!session.lists().contains(&list("home"), &name("milch")));
-        assert!(session
-            .lists()
-            .contains(&list("baumarkt"), &name("schrauben")));
+        assert!(
+            session
+                .lists()
+                .contains(&list("baumarkt"), &name("schrauben"))
+        );
         assert!(!session.can_undo(&list("home")));
         assert!(session.can_undo(&list("baumarkt")));
     }
