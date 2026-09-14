@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use llovlist_core::{DeviceId, Edit, Lists, TrimStr};
+use llovlist_core::{DeviceId, Lists, Position, TrimStr};
 use proptest::prelude::*;
 
 const REPLICAS: usize = 3;
@@ -36,43 +36,30 @@ fn any_action() -> impl Strategy<Value = Action> {
     ]
 }
 
-fn to_edit(lists: &Lists, by: DeviceId, action: Action) -> Edit {
+fn before(order: &[TrimStr], at: usize) -> Position {
+    order
+        .get(at)
+        .map_or(Position::End, |next| Position::Before(next.clone()))
+}
+
+fn perform(lists: &mut Lists, action: Action) {
     match action {
-        Action::CreateList(list) => Edit::CreateList {
-            key: lists.key_at_end(by),
-            list,
-        },
-        Action::RemoveList(list) => Edit::RemoveList { list },
+        Action::CreateList(list) => lists.create(list, Position::End),
+        Action::RemoveList(list) => lists.remove(&list),
         Action::MoveListBefore(list, at) => {
-            let names = lists.names();
-            let before = names.get(at);
-            let after = at.checked_sub(1).and_then(|index| names.get(index));
-            Edit::MoveList {
-                key: lists.key_between(by, after, before),
-                list,
-            }
+            let to = before(&lists.names(), at);
+            lists.list_mut(list).move_to(to);
         }
         Action::AddItem(list, name) => {
-            let key = lists.item_key_at_end(by, &list);
-            Edit::add_item(list, name, key)
+            lists.list_mut(list).add_item(name, Position::End);
         }
-        Action::RemoveItem(list, name) => Edit::RemoveItem { list, name },
+        Action::RemoveItem(list, name) => lists.list_mut(list).remove_item(name),
         Action::MoveItemBefore(list, name, at) => {
-            let items: Vec<TrimStr> = lists
-                .items(&list)
-                .into_iter()
-                .map(|(name, _)| name)
-                .collect();
-            let before = items.get(at);
-            let after = at.checked_sub(1).and_then(|index| items.get(index));
-            Edit::MoveItem {
-                key: lists.item_key_between(by, &list, after, before),
-                list,
-                name,
-            }
+            let to = before(&lists.list(&list).item_names(), at);
+            lists.list_mut(list).move_item(name, to);
         }
-        Action::AddTag(list, name, tag) => Edit::AddTag { list, name, tag },
-        Action::RemoveTag(list, name, tag) => Edit::RemoveTag { list, name, tag },
+        Action::AddTag(list, name, tag) => lists.list_mut(list).add_tag(name, tag),
+        Action::RemoveTag(list, name, tag) => lists.list_mut(list).remove_tag(name, tag),
     }
 }
 
@@ -85,7 +72,7 @@ fn view(lists: &Lists) -> View {
         .names()
         .into_iter()
         .map(|name| {
-            let items = lists.items(&name);
+            let items = lists.list(&name).items();
             (name, items)
         })
         .collect()
@@ -94,11 +81,11 @@ fn view(lists: &Lists) -> View {
 proptest! {
     #[test]
     fn replicas_converge(script in prop::collection::vec((0..REPLICAS, any_action()), 1..40)) {
-        let mut replicas = vec![Lists::default(); REPLICAS];
+        let mut replicas: Vec<Lists> = (0..REPLICAS)
+            .map(|replica| Lists::new(DeviceId::new(replica as u64)))
+            .collect();
         for (replica, action) in script {
-            let by = DeviceId::new(replica as u64);
-            let edit = to_edit(&replicas[replica], by, action);
-            replicas[replica].edit(by, edit);
+            perform(&mut replicas[replica], action);
         }
 
         // Two rounds: a change must also reach replicas that only observe it second-hand.

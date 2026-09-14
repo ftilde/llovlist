@@ -3,11 +3,13 @@ use std::fmt;
 
 use crdts::ctx::AddCtx;
 use crdts::identifier::Identifier;
-use crdts::{CmRDT, CvRDT, MVReg, Map, Orswot, ResetRemove, VClock, map, mvreg};
+use crdts::{map, mvreg, CmRDT, CvRDT, MVReg, Map, Orswot, ResetRemove, VClock};
 use serde::{Deserialize, Serialize};
 
 // Two replicas sharing an id mint the same dots and silently drop each other's entries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 pub struct DeviceId(u64);
 
 impl DeviceId {
@@ -70,64 +72,160 @@ impl fmt::Display for TrimStr {
 
 /// Sort position, dense so that a move writes one key and never renumbers its neighbours.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct OrderKey(Identifier<DeviceId>);
+struct OrderKey(Identifier<DeviceId>);
 
+impl OrderKey {
+    fn between(by: DeviceId, lower: Option<&Self>, upper: Option<&Self>) -> Self {
+        Self(Identifier::between(
+            lower.map(|key| &key.0),
+            upper.map(|key| &key.0),
+            by,
+        ))
+    }
+}
+
+/// Where an entry goes in an order.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Edit {
-    // Keys are computed by the caller, not derived on apply, so replaying an edit during
-    // undo cannot land something somewhere the user never chose.
-    CreateList {
-        list: TrimStr,
-        key: OrderKey,
-    },
-    MoveList {
-        list: TrimStr,
-        key: OrderKey,
-    },
-    RemoveList {
-        list: TrimStr,
-    },
+pub enum Position {
+    Before(TrimStr),
+    End,
+}
+
+/// The key for `at` in `order`, or `None` if `at` names an entry that is not there.
+fn resolve(
+    order: &[TrimStr],
+    key_of: impl Fn(&TrimStr) -> Option<OrderKey>,
+    by: DeviceId,
+    at: &Position,
+) -> Option<OrderKey> {
+    let (lower, upper) = match at {
+        Position::End => (order.last(), None),
+        Position::Before(next) => {
+            let index = order.iter().position(|entry| entry == next)?;
+            (index.checked_sub(1).map(|index| &order[index]), Some(next))
+        }
+    };
+    let lower = lower.and_then(&key_of);
+    let upper = upper.and_then(&key_of);
+    Some(OrderKey::between(by, lower.as_ref(), upper.as_ref()))
+}
+
+fn without(mut order: Vec<TrimStr>, subject: &TrimStr) -> Vec<TrimStr> {
+    order.retain(|entry| entry != subject);
+    order
+}
+
+/// The position landing at `slot` of `order`, one past the end included.
+fn at_slot(order: &[TrimStr], slot: usize) -> Option<Position> {
+    match order.get(slot) {
+        Some(next) => Some(Position::Before(next.clone())),
+        None if slot == order.len() => Some(Position::End),
+        None => None,
+    }
+}
+
+// Positions are resolved to keys when the edit is made and stored as such, so replaying
+// an inverse lands where the item was, not where some name happens to be by then.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ItemEdit {
     AddItem {
-        list: TrimStr,
         name: TrimStr,
         tags: BTreeSet<TrimStr>,
         key: OrderKey,
     },
     MoveItem {
-        list: TrimStr,
         name: TrimStr,
         key: OrderKey,
     },
     RemoveItem {
-        list: TrimStr,
         name: TrimStr,
     },
     AddTag {
-        list: TrimStr,
         name: TrimStr,
         tag: TrimStr,
     },
     RemoveTag {
-        list: TrimStr,
         name: TrimStr,
         tag: TrimStr,
     },
 }
 
-impl Edit {
-    pub fn add_item(list: TrimStr, name: TrimStr, key: OrderKey) -> Self {
-        Self::AddItem {
-            list,
-            name,
-            tags: BTreeSet::new(),
-            key,
+impl ItemEdit {
+    /// The edits that take `list` back to before this one is applied.
+    fn inverse(&self, by: DeviceId, list: &List) -> Option<EditGroup> {
+        let edits = match self {
+            // Reordering is cheap to redo by hand and undoing it surprises more than it
+            // helps, so it has no inverse.
+            Self::MoveItem { .. } => Vec::new(),
+            Self::AddItem { name, tags, .. } if list.contains(name) => {
+                let known = list.tags(name);
+                tags.difference(&known)
+                    .map(|tag| Self::RemoveTag {
+                        name: name.clone(),
+                        tag: tag.clone(),
+                    })
+                    .collect()
+            }
+            Self::AddItem { name, .. } => vec![Self::RemoveItem { name: name.clone() }],
+            Self::RemoveItem { name } if list.contains(name) => vec![list.re_add(by, name)],
+            Self::AddTag { name, tag } if !list.tags(name).contains(tag) => {
+                vec![Self::RemoveTag {
+                    name: name.clone(),
+                    tag: tag.clone(),
+                }]
+            }
+            Self::RemoveTag { name, tag } if list.tags(name).contains(tag) => {
+                vec![Self::AddTag {
+                    name: name.clone(),
+                    tag: tag.clone(),
+                }]
+            }
+            _ => Vec::new(),
+        };
+        EditGroup::collect(edits)
+    }
+}
+
+/// One undo step: edits applied and undone as a whole.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EditGroup(Vec<ItemEdit>);
+
+impl EditGroup {
+    fn collect(edits: Vec<ItemEdit>) -> Option<Self> {
+        (!edits.is_empty()).then_some(Self(edits))
+    }
+
+    /// The edits that take `list` back to before this group is applied, if it changes anything.
+    fn inverse(&self, lists: &Lists, list: &TrimStr) -> Option<Self> {
+        // Each edit is inverted against the state the ones before it leave behind.
+        let mut scratch = lists.clone();
+        let mut inverses = Vec::new();
+        for edit in &self.0 {
+            inverses.push(edit.inverse(lists.device, &scratch.list(list)));
+            scratch.list_mut(list.clone()).edit(edit.clone());
         }
+        Self::collect(
+            inverses
+                .into_iter()
+                .rev()
+                .flatten()
+                .flat_map(|group| group.0)
+                .collect(),
+        )
+    }
+}
+
+impl From<ItemEdit> for EditGroup {
+    fn from(edit: ItemEdit) -> Self {
+        Self(vec![edit])
     }
 }
 
 type Tags = Orswot<TrimStr, DeviceId>;
-type Items = Map<TrimStr, Placed<Tags>, DeviceId>;
-type ListsOp = map::Op<TrimStr, Placed<Items>, DeviceId>;
+pub type Item = Placed<Tags>;
+type Items = Map<TrimStr, Item, DeviceId>;
+pub type List = Placed<Items>;
+type ListsOp = map::Op<TrimStr, List, DeviceId>;
 
 /// A CRDT and its sort position as one map value.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,6 +238,73 @@ impl<V> Placed<V> {
     fn key(&self) -> Option<OrderKey> {
         // Lowest of the concurrent writes, so every replica resolves a move the same way.
         self.position.read().val.into_iter().min()
+    }
+}
+
+/// Sorts by position, unpositioned entries last, ties by name.
+fn sort_key(key: Option<OrderKey>, name: &TrimStr) -> (bool, Option<OrderKey>, TrimStr) {
+    (key.is_none(), key, name.clone())
+}
+
+impl List {
+    pub fn item(&self, name: &TrimStr) -> Option<Item> {
+        self.inner.get(name).val
+    }
+
+    pub fn contains(&self, name: &TrimStr) -> bool {
+        self.item(name).is_some()
+    }
+
+    pub fn tags(&self, name: &TrimStr) -> BTreeSet<TrimStr> {
+        self.item(name).map(|item| item.tags()).unwrap_or_default()
+    }
+
+    pub fn items(&self) -> Vec<(TrimStr, BTreeSet<TrimStr>)> {
+        let mut items: Vec<(Option<OrderKey>, TrimStr, BTreeSet<TrimStr>)> = self
+            .inner
+            .iter()
+            .map(|entry| {
+                let (name, item) = entry.val;
+                (item.key(), name.clone(), item.tags())
+            })
+            .collect();
+        items.sort_by_cached_key(|(key, name, _)| sort_key(key.clone(), name));
+        items
+            .into_iter()
+            .map(|(_, name, tags)| (name, tags))
+            .collect()
+    }
+
+    pub fn item_names(&self) -> Vec<TrimStr> {
+        self.items().into_iter().map(|(name, _)| name).collect()
+    }
+
+    fn item_key(&self, name: &TrimStr) -> Option<OrderKey> {
+        self.item(name)?.key()
+    }
+
+    /// The key for `subject` at `at`, with `subject` taken out of the order first.
+    fn key_for(&self, by: DeviceId, subject: &TrimStr, at: &Position) -> Option<OrderKey> {
+        let order = without(self.item_names(), subject);
+        resolve(&order, |name| self.item_key(name), by, at)
+    }
+
+    /// The edit that puts `name` back with its tags and place.
+    fn re_add(&self, by: DeviceId, name: &TrimStr) -> ItemEdit {
+        ItemEdit::AddItem {
+            key: self.item_key(name).unwrap_or_else(|| {
+                self.key_for(by, name, &Position::End)
+                    .expect("End always resolves")
+            }),
+            name: name.clone(),
+            tags: self.tags(name),
+        }
+    }
+}
+
+impl Item {
+    pub fn tags(&self) -> BTreeSet<TrimStr> {
+        self.inner.read().val.into_iter().collect()
     }
 }
 
@@ -214,443 +379,302 @@ impl<V: ResetRemove<DeviceId>> ResetRemove<DeviceId> for Placed<V> {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lists {
-    lists: Map<TrimStr, Placed<Items>, DeviceId>,
+    lists: Map<TrimStr, List, DeviceId>,
+    device: DeviceId, //TODO: Hm, i don't know if we want to store it here.
+    // Undo state is per device and never leaves it.
+    #[serde(skip)]
+    history: HashMap<TrimStr, Vec<EditGroup>>,
+    #[serde(skip)]
+    deleted: Vec<Removed>,
 }
 
-/// Sorts by position, unpositioned entries last, ties by name.
-fn sort_key(key: Option<OrderKey>, name: &TrimStr) -> (bool, Option<OrderKey>, TrimStr) {
-    (key.is_none(), key, name.clone())
+/// What it takes to put a removed list back: its place and its items.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Removed {
+    list: TrimStr,
+    key: OrderKey,
+    items: Vec<ItemEdit>,
 }
 
 impl Lists {
+    pub fn new(device: DeviceId) -> Self {
+        Self {
+            device,
+            ..Self::default()
+        }
+    }
+
     pub fn names(&self) -> Vec<TrimStr> {
         let mut names: Vec<TrimStr> = self.lists.keys().map(|entry| entry.val.clone()).collect();
         names.sort_by_cached_key(|name| sort_key(self.order_key(name), name));
         names
     }
 
-    pub fn items(&self, list: &TrimStr) -> Vec<(TrimStr, BTreeSet<TrimStr>)> {
-        let Some(list) = self.list(list) else {
-            return Vec::new();
+    pub fn has(&self, name: &TrimStr) -> bool {
+        self.lists.get(name).val.is_some()
+    }
+
+    /// The list, or an empty one if there is none by that name.
+    pub fn list(&self, name: &TrimStr) -> List {
+        self.lists.get(name).val.unwrap_or_default()
+    }
+
+    pub fn list_mut(&mut self, name: TrimStr) -> ListMut<'_> {
+        ListMut { lists: self, name }
+    }
+
+    fn order_key(&self, name: &TrimStr) -> Option<OrderKey> {
+        self.list(name).key()
+    }
+
+    /// The key for `subject` at `at`, with `subject` taken out of the order first.
+    fn key_for(&self, subject: &TrimStr, at: &Position) -> Option<OrderKey> {
+        let order = without(self.names(), subject);
+        resolve(&order, |name| self.order_key(name), self.device, at)
+    }
+
+    /// Creates the list at `at`; an existing list stays where it is.
+    pub fn create(&mut self, name: TrimStr, at: Position) {
+        let Some(key) = self.key_for(&name, &at) else {
+            return;
         };
-        let mut items: Vec<(Option<OrderKey>, TrimStr, BTreeSet<TrimStr>)> = list
-            .inner
-            .iter()
-            .map(|entry| {
-                let (name, item) = entry.val;
-                let tags = item.inner.read().val.into_iter().collect();
-                (item.key(), name.clone(), tags)
-            })
-            .collect();
-        items.sort_by_cached_key(|(key, name, _)| sort_key(key.clone(), name));
-        items
-            .into_iter()
-            .map(|(_, name, tags)| (name, tags))
-            .collect()
+        self.create_at(name, key);
     }
 
-    fn list(&self, list: &TrimStr) -> Option<Placed<Items>> {
-        self.lists.get(list).val
-    }
-
-    fn item(&self, list: &TrimStr, name: &TrimStr) -> Option<Placed<Tags>> {
-        self.list(list)?.inner.get(name).val
-    }
-
-    pub fn order_key(&self, list: &TrimStr) -> Option<OrderKey> {
-        self.list(list)?.key()
-    }
-
-    pub fn item_key(&self, list: &TrimStr, name: &TrimStr) -> Option<OrderKey> {
-        self.item(list, name)?.key()
-    }
-
-    pub fn key_between(
-        &self,
-        by: DeviceId,
-        after: Option<&TrimStr>,
-        before: Option<&TrimStr>,
-    ) -> OrderKey {
-        let lower = after.and_then(|list| self.order_key(list));
-        let upper = before.and_then(|list| self.order_key(list));
-        Self::between(by, lower, upper)
-    }
-
-    pub fn item_key_between(
-        &self,
-        by: DeviceId,
-        list: &TrimStr,
-        after: Option<&TrimStr>,
-        before: Option<&TrimStr>,
-    ) -> OrderKey {
-        let lower = after.and_then(|name| self.item_key(list, name));
-        let upper = before.and_then(|name| self.item_key(list, name));
-        Self::between(by, lower, upper)
-    }
-
-    fn between(by: DeviceId, lower: Option<OrderKey>, upper: Option<OrderKey>) -> OrderKey {
-        OrderKey(Identifier::between(
-            lower.as_ref().map(|key| &key.0),
-            upper.as_ref().map(|key| &key.0),
-            by,
-        ))
-    }
-
-    pub fn key_at_end(&self, by: DeviceId) -> OrderKey {
-        self.key_between(by, self.names().last(), None)
-    }
-
-    pub fn item_key_at_end(&self, by: DeviceId, list: &TrimStr) -> OrderKey {
-        let items = self.items(list);
-        self.item_key_between(by, list, items.last().map(|(name, _)| name), None)
-    }
-
-    /// Position putting `list` at `slot` of the order with `list` taken out.
-    pub fn key_for_slot(&self, by: DeviceId, list: &TrimStr, slot: usize) -> Option<OrderKey> {
-        let (after, before) = neighbours_at(self.names(), list, slot)?;
-        Some(self.key_between(by, after.as_ref(), before.as_ref()))
-    }
-
-    pub fn item_key_for_slot(
-        &self,
-        by: DeviceId,
-        list: &TrimStr,
-        name: &TrimStr,
-        slot: usize,
-    ) -> Option<OrderKey> {
-        let (after, before) = neighbours_at(self.item_names(list), name, slot)?;
-        Some(self.item_key_between(by, list, after.as_ref(), before.as_ref()))
-    }
-
-    /// Position moving `list` `offset` places, or `None` if it cannot move that far.
-    pub fn key_for_move(&self, by: DeviceId, list: &TrimStr, offset: isize) -> Option<OrderKey> {
-        let slot = step(&self.names(), list, offset)?;
-        self.key_for_slot(by, list, slot)
-    }
-
-    pub fn item_key_for_move(
-        &self,
-        by: DeviceId,
-        list: &TrimStr,
-        name: &TrimStr,
-        offset: isize,
-    ) -> Option<OrderKey> {
-        let slot = step(&self.item_names(list), name, offset)?;
-        self.item_key_for_slot(by, list, name, slot)
-    }
-
-    pub fn item_names(&self, list: &TrimStr) -> Vec<TrimStr> {
-        self.items(list).into_iter().map(|(name, _)| name).collect()
-    }
-
-    pub fn has(&self, list: &TrimStr) -> bool {
-        self.list(list).is_some()
-    }
-
-    pub fn contains(&self, list: &TrimStr, name: &TrimStr) -> bool {
-        self.item(list, name).is_some()
-    }
-
-    pub fn tags(&self, list: &TrimStr, name: &TrimStr) -> BTreeSet<TrimStr> {
-        self.item(list, name)
-            .map(|item| item.inner.read().val.into_iter().collect())
-            .unwrap_or_default()
-    }
-
-    pub fn edit(&mut self, by: DeviceId, edit: Edit) {
-        let ctx = self.lists.read_ctx().derive_add_ctx(by);
-        let op = match edit {
-            Edit::CreateList { list, key } => {
-                // Only when new, so re-creating an existing list does not move it.
-                let fresh = !self.has(&list);
-                self.lists.update(list, ctx, |_, ctx| PlacedOp {
-                    position: fresh.then(|| put(key, &ctx)),
-                    inner: None,
-                })
-            }
-            Edit::MoveList { list, key } => {
-                if !self.has(&list) {
-                    return;
-                }
-                self.lists
-                    .update(list, ctx, |_, ctx| PlacedOp::place(key, &ctx))
-            }
-            Edit::RemoveList { list } => {
-                let ctx = self.lists.get(&list).derive_rm_ctx();
-                self.lists.rm(list, ctx)
-            }
-            Edit::AddItem {
-                list,
-                name,
-                tags,
-                key,
-            } => {
-                let fresh = !self.contains(&list, &name);
-                self.update_item(list, name, ctx, |item, ctx| PlacedOp {
-                    position: fresh.then(|| put(key, &ctx)),
-                    inner: Some(item.inner.add_all(tags, ctx)),
-                })
-            }
-            Edit::MoveItem { list, name, key } => {
-                if !self.contains(&list, &name) {
-                    return;
-                }
-                self.update_item(list, name, ctx, |_, ctx| PlacedOp::place(key, &ctx))
-            }
-            Edit::RemoveItem { list, name } => {
-                let Some(items) = self.list(&list) else {
-                    return;
-                };
-                let rm_ctx = items.inner.get(&name).derive_rm_ctx();
-                self.lists.update(list, ctx, |list, _| {
-                    PlacedOp::inner(list.inner.rm(name, rm_ctx))
-                })
-            }
-            Edit::AddTag { list, name, tag } => self.update_item(list, name, ctx, |item, ctx| {
-                PlacedOp::inner(item.inner.add(tag, ctx))
-            }),
-            Edit::RemoveTag { list, name, tag } => {
-                let Some(item) = self.item(&list, &name) else {
-                    return;
-                };
-                let rm_ctx = item.inner.contains(&tag).derive_rm_ctx();
-                // Through `update`, not `rm`, so the item itself stays present.
-                self.update_item(list, name, ctx, |item, _| {
-                    PlacedOp::inner(item.inner.rm(tag, rm_ctx))
-                })
-            }
-        };
+    fn create_at(&mut self, name: TrimStr, key: OrderKey) {
+        // Only when new, so re-creating an existing list does not move it.
+        let fresh = !self.has(&name);
+        let ctx = self.lists.read_ctx().derive_add_ctx(self.device);
+        let op = self.lists.update(name, ctx, |_, ctx| PlacedOp {
+            position: fresh.then(|| put(key, &ctx)),
+            inner: None,
+        });
         self.lists.apply(op);
     }
 
-    fn update_item(
-        &self,
-        list: TrimStr,
-        name: TrimStr,
-        ctx: AddCtx<DeviceId>,
-        f: impl FnOnce(&Placed<Tags>, AddCtx<DeviceId>) -> PlacedOp<<Tags as CmRDT>::Op>,
-    ) -> ListsOp {
-        self.lists.update(list, ctx, |list, ctx| {
-            PlacedOp::inner(list.inner.update(name, ctx, f))
-        })
-    }
-
-    pub fn merge(&mut self, other: Self) {
-        self.lists.merge(other.lists);
-    }
-}
-
-/// The entries `subject` would sit between at `slot` of the order with it taken out.
-fn neighbours_at<T: PartialEq + Clone>(
-    order: Vec<T>,
-    subject: &T,
-    slot: usize,
-) -> Option<(Option<T>, Option<T>)> {
-    let at = order.iter().position(|entry| entry == subject)?;
-    let mut without = order;
-    without.remove(at);
-    // One past the end is a valid landing place; further is not.
-    if slot > without.len() {
-        return None;
-    }
-    Some((
-        slot.checked_sub(1)
-            .and_then(|index| without.get(index))
-            .cloned(),
-        without.get(slot).cloned(),
-    ))
-}
-
-/// Slot `offset` places from where `subject` sits, or `None` if that leaves the order.
-fn step<T: PartialEq>(order: &[T], subject: &T, offset: isize) -> Option<usize> {
-    let at = order.iter().position(|entry| entry == subject)?;
-    let slot = usize::try_from(at as isize + offset).ok()?;
-    (slot < order.len()).then_some(slot)
-}
-
-#[derive(Debug)]
-pub struct Session {
-    device: DeviceId,
-    lists: Lists,
-    history: HashMap<TrimStr, Vec<Vec<Edit>>>,
-    deleted: Vec<Vec<Edit>>,
-}
-
-impl Session {
-    pub fn new(device: DeviceId, lists: Lists) -> Self {
-        Self {
-            device,
-            lists,
-            history: HashMap::new(),
-            deleted: Vec::new(),
+    pub fn remove(&mut self, name: &TrimStr) {
+        // Deleting a list outlives the list, so its restore goes on its own stack --
+        // and the list's own history describes a state that no longer exists.
+        self.history.remove(name);
+        if self.has(name) {
+            self.deleted.push(self.removed(name.clone()));
         }
-    }
-
-    pub fn lists(&self) -> &Lists {
-        &self.lists
-    }
-
-    pub fn can_undo(&self, list: &TrimStr) -> bool {
-        self.history
-            .get(list)
-            .is_some_and(|stack| !stack.is_empty())
+        let ctx = self.lists.get(name).derive_rm_ctx();
+        let op = self.lists.rm(name.clone(), ctx);
+        self.lists.apply(op);
     }
 
     pub fn can_restore(&self) -> bool {
         !self.deleted.is_empty()
     }
 
-    pub fn key_at_end(&self) -> OrderKey {
-        self.lists.key_at_end(self.device)
-    }
-
-    pub fn item_key_at_end(&self, list: &TrimStr) -> OrderKey {
-        self.lists.item_key_at_end(self.device, list)
-    }
-
-    pub fn key_for_move(&self, list: &TrimStr, offset: isize) -> Option<OrderKey> {
-        self.lists.key_for_move(self.device, list, offset)
-    }
-
-    pub fn item_key_for_move(
-        &self,
-        list: &TrimStr,
-        name: &TrimStr,
-        offset: isize,
-    ) -> Option<OrderKey> {
-        self.lists
-            .item_key_for_move(self.device, list, name, offset)
-    }
-
-    pub fn key_for_slot(&self, list: &TrimStr, slot: usize) -> Option<OrderKey> {
-        self.lists.key_for_slot(self.device, list, slot)
-    }
-
-    pub fn item_key_for_slot(
-        &self,
-        list: &TrimStr,
-        name: &TrimStr,
-        slot: usize,
-    ) -> Option<OrderKey> {
-        self.lists.item_key_for_slot(self.device, list, name, slot)
-    }
-
-    pub fn edit(&mut self, edit: Edit) {
-        let revert = self.revert_of(&edit);
-        match &edit {
-            // Deleting a list outlives the list, so its restore goes on its own stack --
-            // and the list's own history describes a state that no longer exists.
-            Edit::RemoveList { list } => {
-                self.history.remove(list);
-                if !revert.is_empty() {
-                    self.deleted.push(revert);
-                }
-            }
-            // Reordering is cheap to redo by hand and undoing it surprises more than it
-            // helps, so it records nothing.
-            Edit::CreateList { .. } | Edit::MoveList { .. } | Edit::MoveItem { .. } => {}
-            Edit::AddItem { list, .. }
-            | Edit::RemoveItem { list, .. }
-            | Edit::AddTag { list, .. }
-            | Edit::RemoveTag { list, .. } => {
-                if !revert.is_empty() {
-                    self.history.entry(list.clone()).or_default().push(revert);
-                }
-            }
-        }
-        self.lists.edit(self.device, edit);
-    }
-
-    pub fn undo(&mut self, list: &TrimStr) {
-        let Some(revert) = self.history.get_mut(list).and_then(Vec::pop) else {
-            return;
-        };
-        for edit in revert {
-            self.lists.edit(self.device, edit);
-        }
-    }
-
     /// Puts the most recently deleted list back, with its items, tags and position.
     pub fn restore_deleted(&mut self) {
-        for edit in self.deleted.pop().unwrap_or_default() {
-            self.lists.edit(self.device, edit);
+        let Some(removed) = self.deleted.pop() else {
+            return;
+        };
+        self.create_at(removed.list.clone(), removed.key);
+        let mut list = self.list_mut(removed.list);
+        for item in removed.items {
+            list.edit(item);
         }
     }
 
-    pub fn merge(&mut self, remote: Lists) {
-        self.lists.merge(remote);
+    pub fn merge(&mut self, other: Self) {
+        self.lists.merge(other.lists);
     }
 
-    fn revert_of(&self, edit: &Edit) -> Vec<Edit> {
-        match edit {
-            Edit::CreateList { .. } | Edit::MoveList { .. } | Edit::MoveItem { .. } => Vec::new(),
-            Edit::RemoveList { list } if self.lists.has(list) => {
-                let mut restore = vec![Edit::CreateList {
-                    list: list.clone(),
-                    key: self.list_key(list),
-                }];
-                restore.extend(self.lists.items(list).into_iter().map(|(name, tags)| {
-                    Edit::AddItem {
-                        key: self.item_key(list, &name),
-                        list: list.clone(),
-                        name,
-                        tags,
-                    }
-                }));
-                restore
+    fn removed(&self, name: TrimStr) -> Removed {
+        let list = self.list(&name);
+        Removed {
+            key: self.order_key(&name).unwrap_or_else(|| {
+                self.key_for(&name, &Position::End)
+                    .expect("End always resolves")
+            }),
+            items: list
+                .item_names()
+                .iter()
+                .map(|item| list.re_add(self.device, item))
+                .collect(),
+            list: name,
+        }
+    }
+}
+
+/// Write access to one list, recording undo steps; reads go through `Lists::list`.
+pub struct ListMut<'a> {
+    lists: &'a mut Lists,
+    name: TrimStr,
+}
+
+impl ListMut<'_> {
+    pub fn add_item(&mut self, name: TrimStr, at: Position) {
+        let Some(key) = self.list().key_for(self.by(), &name, &at) else {
+            return;
+        };
+        self.apply(
+            ItemEdit::AddItem {
+                name,
+                tags: BTreeSet::new(),
+                key,
             }
-            Edit::AddItem {
-                list, name, tags, ..
-            } if self.lists.contains(list, name) => {
-                let known = self.lists.tags(list, name);
-                tags.difference(&known)
-                    .map(|tag| Edit::RemoveTag {
-                        list: list.clone(),
-                        name: name.clone(),
-                        tag: tag.clone(),
-                    })
-                    .collect()
-            }
-            Edit::AddItem { list, name, .. } => vec![Edit::RemoveItem {
-                list: list.clone(),
-                name: name.clone(),
-            }],
-            Edit::RemoveItem { list, name } if self.lists.contains(list, name) => {
-                vec![Edit::AddItem {
-                    key: self.item_key(list, name),
-                    list: list.clone(),
-                    name: name.clone(),
-                    tags: self.lists.tags(list, name),
-                }]
-            }
-            Edit::AddTag { list, name, tag } if !self.lists.tags(list, name).contains(tag) => {
-                vec![Edit::RemoveTag {
-                    list: list.clone(),
-                    name: name.clone(),
-                    tag: tag.clone(),
-                }]
-            }
-            Edit::RemoveTag { list, name, tag } if self.lists.tags(list, name).contains(tag) => {
-                vec![Edit::AddTag {
-                    list: list.clone(),
-                    name: name.clone(),
-                    tag: tag.clone(),
-                }]
-            }
-            _ => Vec::new(),
+            .into(),
+        );
+    }
+
+    pub fn move_item(&mut self, name: TrimStr, to: Position) {
+        let Some(key) = self.list().key_for(self.by(), &name, &to) else {
+            return;
+        };
+        self.apply(ItemEdit::MoveItem { name, key }.into());
+    }
+
+    /// Drops `name` into `slot` of the order with `name` taken out.
+    pub fn move_item_to_slot(&mut self, name: TrimStr, slot: usize) {
+        let order = without(self.list().item_names(), &name);
+        if let Some(to) = at_slot(&order, slot) {
+            self.move_item(name, to);
         }
     }
 
-    fn list_key(&self, list: &TrimStr) -> OrderKey {
-        self.lists
-            .order_key(list)
-            .unwrap_or_else(|| self.key_at_end())
+    pub fn remove_item(&mut self, name: TrimStr) {
+        self.apply(ItemEdit::RemoveItem { name }.into());
     }
 
-    fn item_key(&self, list: &TrimStr, name: &TrimStr) -> OrderKey {
+    pub fn add_tag(&mut self, name: TrimStr, tag: TrimStr) {
+        self.apply(ItemEdit::AddTag { name, tag }.into());
+    }
+
+    pub fn remove_tag(&mut self, name: TrimStr, tag: TrimStr) {
+        self.apply(ItemEdit::RemoveTag { name, tag }.into());
+    }
+
+    /// Moves the list itself.
+    pub fn move_to(&mut self, to: Position) {
+        if !self.lists.has(&self.name) {
+            return;
+        }
+        let Some(key) = self.lists.key_for(&self.name, &to) else {
+            return;
+        };
+        let map = &self.lists.lists;
+        let ctx = map.read_ctx().derive_add_ctx(self.by());
+        let op = map.update(self.name.clone(), ctx, |_, ctx| PlacedOp::place(key, &ctx));
+        self.lists.lists.apply(op);
+    }
+
+    /// Drops the list into `slot` of the order with it taken out.
+    pub fn move_to_slot(&mut self, slot: usize) {
+        let order = without(self.lists.names(), &self.name);
+        if let Some(to) = at_slot(&order, slot) {
+            self.move_to(to);
+        }
+    }
+
+    pub fn can_undo(&self) -> bool {
         self.lists
-            .item_key(list, name)
-            .unwrap_or_else(|| self.item_key_at_end(list))
+            .history
+            .get(&self.name)
+            .is_some_and(|stack| !stack.is_empty())
+    }
+
+    pub fn undo(&mut self) {
+        let Some(inverse) = self.lists.history.get_mut(&self.name).and_then(Vec::pop) else {
+            return;
+        };
+        self.apply_raw(inverse);
+    }
+
+    fn list(&self) -> List {
+        self.lists.list(&self.name)
+    }
+
+    fn by(&self) -> DeviceId {
+        self.lists.device
+    }
+
+    fn apply(&mut self, group: EditGroup) {
+        if let Some(inverse) = group.inverse(self.lists, &self.name) {
+            self.lists
+                .history
+                .entry(self.name.clone())
+                .or_default()
+                .push(inverse);
+        }
+        self.apply_raw(group);
+    }
+
+    fn apply_raw(&mut self, group: EditGroup) {
+        for edit in group.0 {
+            self.edit(edit);
+        }
+    }
+
+    fn edit(&mut self, edit: ItemEdit) {
+        let list = self.list();
+        let map = &self.lists.lists;
+        let ctx = map.read_ctx().derive_add_ctx(self.by());
+        let op = match edit {
+            ItemEdit::AddItem { name, tags, key } => {
+                let fresh = !list.contains(&name);
+                self.update_item(name, ctx, |item, ctx| PlacedOp {
+                    position: fresh.then(|| put(key, &ctx)),
+                    inner: Some(item.inner.add_all(tags, ctx)),
+                })
+            }
+            ItemEdit::MoveItem { name, key } => {
+                if !list.contains(&name) {
+                    return;
+                }
+                self.update_item(name, ctx, |_, ctx| PlacedOp::place(key, &ctx))
+            }
+            ItemEdit::RemoveItem { name } => {
+                let rm_ctx = list.inner.get(&name).derive_rm_ctx();
+                map.update(self.name.clone(), ctx, |entry, _| {
+                    PlacedOp::inner(entry.inner.rm(name, rm_ctx))
+                })
+            }
+            ItemEdit::AddTag { name, tag } => self.update_item(name, ctx, |item, ctx| {
+                PlacedOp::inner(item.inner.add(tag, ctx))
+            }),
+            ItemEdit::RemoveTag { name, tag } => {
+                let Some(item) = list.item(&name) else {
+                    return;
+                };
+                let rm_ctx = item.inner.contains(&tag).derive_rm_ctx();
+                // Through `update`, not `rm`, so the item itself stays present.
+                self.update_item(name, ctx, |item, _| {
+                    PlacedOp::inner(item.inner.rm(tag, rm_ctx))
+                })
+            }
+        };
+        self.lists.lists.apply(op);
+    }
+
+    fn update_item(
+        &self,
+        name: TrimStr,
+        ctx: AddCtx<DeviceId>,
+        f: impl FnOnce(&Item, AddCtx<DeviceId>) -> PlacedOp<<Tags as CmRDT>::Op>,
+    ) -> ListsOp {
+        self.lists
+            .lists
+            .update(self.name.clone(), ctx, |entry, ctx| {
+                PlacedOp::inner(entry.inner.update(name, ctx, f))
+            })
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Session {
+    pub lists: Lists,
+}
+
+impl Session {
+    pub fn new(device: DeviceId) -> Self {
+        Self {
+            lists: Lists::new(device),
+        }
     }
 }
 
@@ -672,46 +696,34 @@ mod tests {
         TrimStr::new(raw).unwrap()
     }
 
-    fn create(session: &Session, name: &str) -> Edit {
-        Edit::CreateList {
-            key: session.key_at_end(),
-            list: list(name),
-        }
+    fn create(session: &mut Lists, name: &str) {
+        session.create(list(name), Position::End);
     }
 
-    fn add(session: &Session, in_list: &str, item: &str) -> Edit {
-        Edit::add_item(
-            list(in_list),
-            name(item),
-            session.item_key_at_end(&list(in_list)),
-        )
+    fn add(session: &mut Lists, in_list: &str, item: &str) {
+        session
+            .list_mut(list(in_list))
+            .add_item(name(item), Position::End);
     }
 
-    fn three_lists() -> Session {
-        let mut session = Session::new(ALICE, Lists::default());
+    fn three_lists() -> Lists {
+        let mut session = Lists::new(ALICE);
         for entry in ["a", "b", "c"] {
-            let edit = create(&session, entry);
-            session.edit(edit);
+            create(&mut session, entry);
         }
         session
     }
 
-    fn home_with_items() -> Session {
-        let mut session = Session::new(ALICE, Lists::default());
+    fn home_with_items() -> Lists {
+        let mut session = Lists::new(ALICE);
         for item in ["milch", "brot", "kaffee"] {
-            let edit = add(&session, "home", item);
-            session.edit(edit);
+            add(&mut session, "home", item);
         }
         session
     }
 
-    fn item_order(session: &Session) -> Vec<TrimStr> {
-        session
-            .lists()
-            .items(&list("home"))
-            .into_iter()
-            .map(|(name, _)| name)
-            .collect()
+    fn item_order(session: &Lists) -> Vec<TrimStr> {
+        session.list(&list("home")).item_names()
     }
 
     #[test]
@@ -725,30 +737,20 @@ mod tests {
     }
 
     #[test]
-    fn an_item_moves_one_place_at_a_time() {
+    fn an_item_moves_before_another() {
         let mut session = home_with_items();
 
-        let key = session
-            .item_key_for_move(&list("home"), &name("kaffee"), -1)
-            .unwrap();
-        session.edit(Edit::MoveItem {
-            list: list("home"),
-            name: name("kaffee"),
-            key,
-        });
+        session
+            .list_mut(list("home"))
+            .move_item(name("kaffee"), Position::Before(name("brot")));
         assert_eq!(
             item_order(&session),
             [name("milch"), name("kaffee"), name("brot")]
         );
 
-        let key = session
-            .item_key_for_move(&list("home"), &name("kaffee"), -1)
-            .unwrap();
-        session.edit(Edit::MoveItem {
-            list: list("home"),
-            name: name("kaffee"),
-            key,
-        });
+        session
+            .list_mut(list("home"))
+            .move_item(name("kaffee"), Position::Before(name("milch")));
         assert_eq!(
             item_order(&session),
             [name("kaffee"), name("milch"), name("brot")]
@@ -764,14 +766,9 @@ mod tests {
             (1, ["milch", "kaffee", "brot"]),
             (2, ["milch", "brot", "kaffee"]),
         ] {
-            let key = session
-                .item_key_for_slot(&list("home"), &name("kaffee"), slot)
-                .unwrap();
-            session.edit(Edit::MoveItem {
-                list: list("home"),
-                name: name("kaffee"),
-                key,
-            });
+            session
+                .list_mut(list("home"))
+                .move_item_to_slot(name("kaffee"), slot);
             assert_eq!(
                 item_order(&session),
                 expected.map(name).to_vec(),
@@ -781,56 +778,43 @@ mod tests {
     }
 
     #[test]
-    fn a_slot_past_the_end_is_refused() {
-        let session = home_with_items();
+    fn a_slot_past_the_end_leaves_the_order_alone() {
+        let mut session = home_with_items();
 
         // Three items, so slots 0..=2 exist once the dragged one is taken out.
-        assert!(
-            session
-                .item_key_for_slot(&list("home"), &name("kaffee"), 2)
-                .is_some()
-        );
+        session
+            .list_mut(list("home"))
+            .move_item_to_slot(name("milch"), 3);
+
         assert_eq!(
-            session.item_key_for_slot(&list("home"), &name("kaffee"), 3),
-            None
+            item_order(&session),
+            [name("milch"), name("brot"), name("kaffee")]
         );
     }
 
     #[test]
-    fn an_item_cannot_move_past_either_end() {
-        let session = home_with_items();
+    fn moving_before_an_unknown_item_does_nothing() {
+        let mut session = home_with_items();
+
+        session
+            .list_mut(list("home"))
+            .move_item(name("kaffee"), Position::Before(name("nope")));
 
         assert_eq!(
-            session.item_key_for_move(&list("home"), &name("milch"), -1),
-            None
-        );
-        assert_eq!(
-            session.item_key_for_move(&list("home"), &name("kaffee"), 1),
-            None
-        );
-        assert_eq!(
-            session.item_key_for_move(&list("home"), &name("nope"), 1),
-            None
+            item_order(&session),
+            [name("milch"), name("brot"), name("kaffee")]
         );
     }
 
     #[test]
     fn moving_an_item_records_nothing_to_undo() {
         let mut session = home_with_items();
-        session.edit(Edit::RemoveItem {
-            list: list("home"),
-            name: name("brot"),
-        });
+        session.list_mut(list("home")).remove_item(name("brot"));
 
-        let key = session
-            .item_key_for_move(&list("home"), &name("kaffee"), -1)
-            .unwrap();
-        session.edit(Edit::MoveItem {
-            list: list("home"),
-            name: name("kaffee"),
-            key,
-        });
-        session.undo(&list("home"));
+        session
+            .list_mut(list("home"))
+            .move_item(name("kaffee"), Position::Before(name("milch")));
+        session.list_mut(list("home")).undo();
 
         // The move is left alone; undo reaches past it to the tick-off.
         assert_eq!(
@@ -843,11 +827,8 @@ mod tests {
     fn undo_of_a_tick_off_restores_the_items_place() {
         let mut session = home_with_items();
 
-        session.edit(Edit::RemoveItem {
-            list: list("home"),
-            name: name("brot"),
-        });
-        session.undo(&list("home"));
+        session.list_mut(list("home")).remove_item(name("brot"));
+        session.list_mut(list("home")).undo();
 
         assert_eq!(
             item_order(&session),
@@ -859,8 +840,7 @@ mod tests {
     fn re_adding_an_item_does_not_move_it() {
         let mut session = home_with_items();
 
-        let edit = add(&session, "home", "milch");
-        session.edit(edit);
+        add(&mut session, "home", "milch");
 
         assert_eq!(
             item_order(&session),
@@ -870,69 +850,78 @@ mod tests {
 
     #[test]
     fn removing_the_last_tag_keeps_the_item() {
-        let mut session = Session::new(ALICE, Lists::default());
-        let edit = add(&session, "home", "milch");
-        session.edit(edit);
-        session.edit(Edit::AddTag {
-            list: list("home"),
-            name: name("milch"),
-            tag: tag("2x"),
-        });
-        session.edit(Edit::RemoveTag {
-            list: list("home"),
-            name: name("milch"),
-            tag: tag("2x"),
-        });
+        let mut session = Lists::new(ALICE);
+        add(&mut session, "home", "milch");
+        session
+            .list_mut(list("home"))
+            .add_tag(name("milch"), tag("2x"));
+        session
+            .list_mut(list("home"))
+            .remove_tag(name("milch"), tag("2x"));
 
         assert_eq!(
-            session.lists().items(&list("home")),
+            session.list(&list("home")).items(),
             vec![(name("milch"), BTreeSet::new())]
         );
     }
 
     #[test]
-    fn a_list_moves_one_place_at_a_time() {
+    fn a_list_can_be_created_before_another() {
         let mut session = three_lists();
 
-        for (subject, offset, expected) in [
-            ("c", -1, ["a", "c", "b"]),
-            ("c", -1, ["c", "a", "b"]),
-            ("c", 1, ["a", "c", "b"]),
-            ("c", 1, ["a", "b", "c"]),
+        session.create(list("d"), Position::Before(list("b")));
+
+        assert_eq!(
+            session.names(),
+            vec![list("a"), list("d"), list("b"), list("c")]
+        );
+    }
+
+    #[test]
+    fn a_list_moves_before_another() {
+        let mut session = three_lists();
+
+        for (to, expected) in [
+            (Position::Before(list("a")), ["c", "a", "b"]),
+            (Position::Before(list("b")), ["a", "c", "b"]),
+            (Position::End, ["a", "b", "c"]),
         ] {
-            let key = session.key_for_move(&list(subject), offset).unwrap();
-            session.edit(Edit::MoveList {
-                list: list(subject),
-                key,
-            });
+            session.list_mut(list("c")).move_to(to.clone());
             assert_eq!(
-                session.lists().names(),
+                session.names(),
                 expected.map(list).to_vec(),
-                "after moving {subject} by {offset}"
+                "after moving c to {to:?}"
             );
         }
     }
 
     #[test]
-    fn a_list_cannot_move_past_either_end() {
-        let session = three_lists();
+    fn a_list_can_be_dropped_into_any_slot() {
+        let mut session = three_lists();
 
-        assert_eq!(session.key_for_move(&list("a"), -1), None);
-        assert_eq!(session.key_for_move(&list("c"), 1), None);
-        assert_eq!(session.key_for_move(&list("nope"), 1), None);
+        for (slot, expected) in [
+            (0, ["c", "a", "b"]),
+            (1, ["a", "c", "b"]),
+            (2, ["a", "b", "c"]),
+        ] {
+            session.list_mut(list("c")).move_to_slot(slot);
+            assert_eq!(
+                session.names(),
+                expected.map(list).to_vec(),
+                "dropping c into slot {slot}"
+            );
+        }
     }
 
     #[test]
     fn moving_a_list_records_nothing_to_undo() {
         let mut session = three_lists();
 
-        let key = session.key_for_move(&list("c"), -1).unwrap();
-        session.edit(Edit::MoveList {
-            list: list("c"),
-            key,
-        });
+        session
+            .list_mut(list("c"))
+            .move_to(Position::Before(list("a")));
 
-        assert!(!session.can_undo(&list("c")));
+        assert!(!session.list_mut(list("c")).can_undo());
         assert!(!session.can_restore());
     }
 
@@ -940,33 +929,27 @@ mod tests {
     fn restoring_a_deleted_list_puts_it_back_in_place() {
         let mut session = three_lists();
 
-        session.edit(Edit::RemoveList { list: list("b") });
+        session.remove(&list("b"));
         assert!(session.can_restore());
         session.restore_deleted();
 
-        assert_eq!(
-            session.lists().names(),
-            vec![list("a"), list("b"), list("c")]
-        );
+        assert_eq!(session.names(), vec![list("a"), list("b"), list("c")]);
     }
 
     #[test]
     fn undo_restores_a_removed_list_with_its_items_and_tags() {
-        let mut session = Session::new(ALICE, Lists::default());
-        let edit = add(&session, "home", "milch");
-        session.edit(edit);
-        session.edit(Edit::AddTag {
-            list: list("home"),
-            name: name("milch"),
-            tag: tag("2x"),
-        });
-        session.edit(Edit::RemoveList { list: list("home") });
+        let mut session = Lists::new(ALICE);
+        add(&mut session, "home", "milch");
+        session
+            .list_mut(list("home"))
+            .add_tag(name("milch"), tag("2x"));
+        session.remove(&list("home"));
 
         session.restore_deleted();
 
-        assert_eq!(session.lists().names(), vec![list("home")]);
+        assert_eq!(session.names(), vec![list("home")]);
         assert_eq!(
-            session.lists().tags(&list("home"), &name("milch")),
+            session.list(&list("home")).tags(&name("milch")),
             BTreeSet::from([tag("2x")])
         );
     }
@@ -974,51 +957,41 @@ mod tests {
     // An edit that changed nothing costs no undo press; the next one reaches past it.
     #[test]
     fn re_adding_an_item_records_no_undo_step() {
-        let mut session = Session::new(ALICE, Lists::default());
-        let first = add(&session, "home", "milch");
-        session.edit(first);
-        let again = add(&session, "home", "milch");
-        session.edit(again);
+        let mut session = Lists::new(ALICE);
+        add(&mut session, "home", "milch");
+        add(&mut session, "home", "milch");
 
-        session.undo(&list("home"));
+        session.list_mut(list("home")).undo();
 
-        assert!(!session.lists().contains(&list("home"), &name("milch")));
-        assert!(!session.can_undo(&list("home")));
+        assert!(!session.list(&list("home")).contains(&name("milch")));
+        assert!(!session.list_mut(list("home")).can_undo());
     }
 
     #[test]
     fn each_list_undoes_on_its_own() {
-        let mut session = Session::new(ALICE, Lists::default());
+        let mut session = Lists::new(ALICE);
         for (in_list, item) in [("home", "milch"), ("baumarkt", "schrauben")] {
-            let edit = add(&session, in_list, item);
-            session.edit(edit);
+            add(&mut session, in_list, item);
         }
 
-        session.undo(&list("home"));
+        session.list_mut(list("home")).undo();
 
-        assert!(!session.lists().contains(&list("home"), &name("milch")));
-        assert!(
-            session
-                .lists()
-                .contains(&list("baumarkt"), &name("schrauben"))
-        );
-        assert!(!session.can_undo(&list("home")));
-        assert!(session.can_undo(&list("baumarkt")));
+        assert!(!session.list(&list("home")).contains(&name("milch")));
+        assert!(session.list(&list("baumarkt")).contains(&name("schrauben")));
+        assert!(!session.list_mut(list("home")).can_undo());
+        assert!(session.list_mut(list("baumarkt")).can_undo());
     }
 
     #[test]
     fn deleting_a_list_drops_its_undo_history() {
         let mut session = home_with_items();
-        session.edit(Edit::RemoveItem {
-            list: list("home"),
-            name: name("brot"),
-        });
+        session.list_mut(list("home")).remove_item(name("brot"));
 
-        session.edit(Edit::RemoveList { list: list("home") });
+        session.remove(&list("home"));
         session.restore_deleted();
 
         // The restored list is whole, and its earlier steps are not replayable onto it.
-        assert!(!session.can_undo(&list("home")));
+        assert!(!session.list_mut(list("home")).can_undo());
         assert_eq!(item_order(&session), [name("milch"), name("kaffee")]);
     }
 }
