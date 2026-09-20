@@ -1,6 +1,10 @@
 use std::time::Duration;
 
+use dioxus::prelude::*;
 use llovlist_core::Lists;
+
+use crate::notice::{Notice, show};
+use crate::state::{Settings, State, store};
 
 // Without this a firewalled host looks like a hang rather than a failure.
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -45,4 +49,24 @@ fn describe(error: reqwest::Error) -> String {
         cause = error.source();
     }
     message
+}
+
+pub fn start_sync(mut state: Signal<State>, settings: Signal<Settings>, notice: Signal<Notice>) {
+    let settings = settings.read().clone();
+    let local = state.read().lists.clone();
+    spawn(async move {
+        match exchange(&settings.server, &settings.token, local).await {
+            Ok(merged) => {
+                state.write().lists.merge(merged);
+                store(state);
+                let count = state.read().lists.names().len();
+                let plural = if count == 1 { "" } else { "s" };
+                show(notice, format!("synced, {count} list{plural}"));
+            }
+            Err(reason) => {
+                eprintln!("sync failed: {reason}");
+                show(notice, format!("sync failed: {reason}"));
+            }
+        }
+    });
 }
