@@ -6,10 +6,14 @@ use dioxus::prelude::*;
 use llovlist_core::{Position, TrimStr};
 
 use crate::drag::{Drag, DragCatcher, Grip, row_class};
-use crate::state::{State, edit, move_item_to, move_list_to};
+use crate::state::{Scope, State, edit, move_item_to, move_list_to};
 
 #[component]
-pub fn ListsView(selected: Option<TrimStr>, current: Signal<Option<TrimStr>>) -> Element {
+pub fn ListsView(
+    scope: Scope,
+    selected: Option<TrimStr>,
+    current: Signal<Option<TrimStr>>,
+) -> Element {
     let state: Signal<State> = use_context();
     let mut current = current;
     let mut draft = use_signal(String::new);
@@ -18,10 +22,10 @@ pub fn ListsView(selected: Option<TrimStr>, current: Signal<Option<TrimStr>>) ->
 
     let list_line = list_drag().map(|drag| drag.line_before());
     let item_line = item_drag().map(|drag| drag.line_before());
-    let names = state.read().lists.names();
+    let names = scope.of(&state.read().data).names();
     let items = selected
         .as_ref()
-        .map(|list| state.read().lists.list(list).items())
+        .map(|list| scope.of(&state.read().data).list(list).items())
         .unwrap_or_default();
 
     rsx! {
@@ -37,7 +41,7 @@ pub fn ListsView(selected: Option<TrimStr>, current: Signal<Option<TrimStr>>) ->
                         drag: list_drag,
                         on_drop: {
                             let name = name.clone();
-                            move |slot| move_list_to(state, &name, slot)
+                            move |slot| move_list_to(state, scope, &name, slot)
                         },
                     }
                     button {
@@ -51,7 +55,7 @@ pub fn ListsView(selected: Option<TrimStr>, current: Signal<Option<TrimStr>>) ->
                 }
             }
             if names.is_empty() {
-                p { class: "empty", "no list yet — add one from the menu" }
+                p { class: "empty", "nothing here yet — add one from the menu" }
             }
         }
 
@@ -67,6 +71,7 @@ pub fn ListsView(selected: Option<TrimStr>, current: Signal<Option<TrimStr>>) ->
                             index,
                             count: items.len(),
                             line: item_line,
+                            scope,
                             list: list.clone(),
                             name,
                             tags,
@@ -88,7 +93,7 @@ pub fn ListsView(selected: Option<TrimStr>, current: Signal<Option<TrimStr>>) ->
                         let list = list.clone();
                         move |event: KeyboardEvent| {
                             if event.key() == Key::Enter {
-                                add_item(state, list.clone(), draft);
+                                add_item(state, scope, list.clone(), draft);
                             }
                         }
                     },
@@ -97,7 +102,7 @@ pub fn ListsView(selected: Option<TrimStr>, current: Signal<Option<TrimStr>>) ->
                     class: "icon",
                     onclick: {
                         let list = list.clone();
-                        move |_| add_item(state, list.clone(), draft)
+                        move |_| add_item(state, scope, list.clone(), draft)
                     },
                     "+"
                 }
@@ -107,7 +112,7 @@ pub fn ListsView(selected: Option<TrimStr>, current: Signal<Option<TrimStr>>) ->
         if let Some(dragged) = list_drag().and_then(|drag| names.get(drag.from).cloned()) {
             DragCatcher {
                 drag: list_drag,
-                on_drop: move |slot| move_list_to(state, &dragged, slot),
+                on_drop: move |slot| move_list_to(state, scope, &dragged, slot),
             }
         }
 
@@ -117,22 +122,25 @@ pub fn ListsView(selected: Option<TrimStr>, current: Signal<Option<TrimStr>>) ->
         {
             DragCatcher {
                 drag: item_drag,
-                on_drop: move |slot| move_item_to(state, &list, &dragged.0, slot),
+                on_drop: move |slot| move_item_to(state, scope, &list, &dragged.0, slot),
             }
         }
     }
 }
 
-fn add_item(state: Signal<State>, list: TrimStr, mut draft: Signal<String>) {
+fn add_item(state: Signal<State>, scope: Scope, list: TrimStr, mut draft: Signal<String>) {
     let name = TrimStr::new(&draft.read());
     if let Ok(name) = name {
-        edit(state, list, |list| list.add_item(name, Position::End));
+        edit(state, scope, list, |list| {
+            list.add_item(name, Position::End)
+        });
         draft.set(String::new());
     }
 }
 
 fn add_tag(
     state: Signal<State>,
+    scope: Scope,
     list: TrimStr,
     name: TrimStr,
     mut draft: Signal<String>,
@@ -140,7 +148,7 @@ fn add_tag(
 ) {
     let tag = TrimStr::new(&draft.read());
     if let Ok(tag) = tag {
-        edit(state, list, |list| list.add_tag(name, tag));
+        edit(state, scope, list, |list| list.add_tag(name, tag));
     }
     draft.set(String::new());
     adding.set(false);
@@ -151,6 +159,7 @@ fn ItemRow(
     index: usize,
     count: usize,
     line: Option<usize>,
+    scope: Scope,
     list: TrimStr,
     name: TrimStr,
     tags: BTreeSet<TrimStr>,
@@ -173,7 +182,7 @@ fn ItemRow(
                 drag,
                 on_drop: {
                     let (list, name) = (list.clone(), name.clone());
-                    move |slot| move_item_to(state, &list, &name, slot)
+                    move |slot| move_item_to(state, scope, &list, &name, slot)
                 },
             }
             button {
@@ -183,7 +192,7 @@ fn ItemRow(
                     let (list, name) = (list.clone(), name.clone());
                     move |_| {
                         let name = name.clone();
-                        edit(state, list.clone(), |list| list.remove_item(name))
+                        edit(state, scope, list.clone(), |list| list.remove_item(name))
                     }
                 },
                 "✓"
@@ -198,7 +207,7 @@ fn ItemRow(
                             let (list, name, tag) = (list.clone(), name.clone(), tag.clone());
                             move |_| {
                                 let (name, tag) = (name.clone(), tag.clone());
-                                edit(state, list.clone(), |list| list.remove_tag(name, tag))
+                                edit(state, scope, list.clone(), |list| list.remove_tag(name, tag))
                             }
                         },
                         "{tag} ×"
@@ -216,7 +225,7 @@ fn ItemRow(
                             let (list, name) = (list.clone(), name.clone());
                             move |event: KeyboardEvent| match event.key() {
                                 Key::Enter => {
-                                    add_tag(state, list.clone(), name.clone(), draft, adding)
+                                    add_tag(state, scope, list.clone(), name.clone(), draft, adding)
                                 }
                                 Key::Escape => adding.set(false),
                                 _ => {}

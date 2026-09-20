@@ -39,6 +39,20 @@ body {
   height: 100dvh;
   max-width: 34rem;
   margin: 0 auto;
+  background: var(--bg);
+}
+
+/* Templates look like lists, so the tint is what tells them apart. */
+.app.templates {
+  --bg: #fbf1e4;
+  --chip: #f0e3d0;
+}
+
+@media (prefers-color-scheme: dark) {
+  .app.templates {
+    --bg: #211b15;
+    --chip: #33291f;
+  }
 }
 
 .topbar {

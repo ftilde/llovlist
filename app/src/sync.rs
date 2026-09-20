@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use dioxus::prelude::*;
-use llovlist_core::Lists;
+use llovlist_core::Data;
 
 use crate::notice::{Notice, show};
 use crate::state::{Settings, State, store};
@@ -9,7 +9,7 @@ use crate::state::{Settings, State, store};
 // Without this a firewalled host looks like a hang rather than a failure.
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-pub async fn exchange(server: &str, token: &str, local: Lists) -> Result<Lists, String> {
+pub async fn exchange(server: &str, token: &str, local: Data) -> Result<Data, String> {
     if server.is_empty() {
         return Err("set a server address first".to_owned());
     }
@@ -53,15 +53,24 @@ fn describe(error: reqwest::Error) -> String {
 
 pub fn start_sync(mut state: Signal<State>, settings: Signal<Settings>, notice: Signal<Notice>) {
     let settings = settings.read().clone();
-    let local = state.read().lists.clone();
+    let local = state.read().data.clone();
     spawn(async move {
         match exchange(&settings.server, &settings.token, local).await {
             Ok(merged) => {
-                state.write().lists.merge(merged);
+                state.write().data.merge(merged);
                 store(state);
-                let count = state.read().lists.names().len();
-                let plural = if count == 1 { "" } else { "s" };
-                show(notice, format!("synced, {count} list{plural}"));
+                let (lists, templates) = {
+                    let data = &state.read().data;
+                    (data.lists.names().len(), data.templates.names().len())
+                };
+                show(
+                    notice,
+                    format!(
+                        "synced, {}, {}",
+                        counted(lists, "list"),
+                        counted(templates, "template")
+                    ),
+                );
             }
             Err(reason) => {
                 eprintln!("sync failed: {reason}");
@@ -69,4 +78,9 @@ pub fn start_sync(mut state: Signal<State>, settings: Signal<Settings>, notice: 
             }
         }
     });
+}
+
+fn counted(count: usize, noun: &str) -> String {
+    let plural = if count == 1 { "" } else { "s" };
+    format!("{count} {noun}{plural}")
 }

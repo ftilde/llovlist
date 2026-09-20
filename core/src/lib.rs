@@ -401,6 +401,34 @@ impl<V: ResetRemove<DeviceId>> ResetRemove<DeviceId> for Placed<V> {
     }
 }
 
+/// Everything a device holds and syncs: the shopping lists and the templates to fill
+/// them from.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Data {
+    pub lists: Lists,
+    #[serde(default)]
+    pub templates: Lists,
+}
+
+impl Data {
+    pub fn merge(&mut self, other: Self) {
+        self.lists.merge(other.lists);
+        self.templates.merge(other.templates);
+    }
+
+    /// Parses either the current shape or the pre-template one, a bare `Lists`.
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json).or_else(|error| {
+            serde_json::from_str::<Lists>(json)
+                .map(|lists| Self {
+                    lists,
+                    templates: Lists::default(),
+                })
+                .map_err(|_| error)
+        })
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lists {
     lists: Map<TrimStr, List, DeviceId>,
@@ -566,6 +594,31 @@ impl ListMut<'_> {
     /// Puts a removed item back where it was, with the tags it had.
     pub fn restore(&mut self, snapshot: ItemSnapshot) {
         self.apply(snapshot.0.into());
+    }
+
+    /// Adds every item of `template` at the end, tags included, as one undo step.
+    pub fn fill_from(&mut self, template: &List) {
+        let list = self.list();
+        let mut last = list
+            .item_names()
+            .last()
+            .and_then(|name| list.item_key(name));
+        let edits = template
+            .items()
+            .into_iter()
+            .map(|(name, tags)| {
+                // Existing items keep their place; only their tags are topped up.
+                let key = list.item_key(&name).unwrap_or_else(|| {
+                    let key = OrderKey::between(self.by(), last.as_ref(), None);
+                    last = Some(key.clone());
+                    key
+                });
+                ItemEdit::AddItem { name, tags, key }
+            })
+            .collect();
+        if let Some(group) = EditGroup::collect(edits) {
+            self.apply(group);
+        }
     }
 
     pub fn move_item(&mut self, name: TrimStr, to: Position) {
@@ -854,6 +907,43 @@ mod tests {
         assert_eq!(item_order(&session), [name("milch"), name("kaffee")]);
         assert!(!session.can_redo(&list("home")));
         assert!(session.can_undo(&list("home")));
+    }
+
+    #[test]
+    fn filling_from_a_template_appends_in_order_and_undoes_as_one_step() {
+        let mut session = home_with_items();
+        let mut template = Lists::default();
+        for item in ["kaffee", "eier", "mehl"] {
+            add(&mut template, "weekly", item);
+        }
+        template
+            .list_mut(&ALICE, list("weekly"))
+            .add_tag(name("eier"), tag("10"));
+
+        session
+            .list_mut(&ALICE, list("home"))
+            .fill_from(&template.list(&list("weekly")));
+
+        assert_eq!(
+            item_order(&session),
+            [
+                name("milch"),
+                name("brot"),
+                name("kaffee"),
+                name("eier"),
+                name("mehl")
+            ]
+        );
+        assert_eq!(
+            session.list(&list("home")).tags(&name("eier")),
+            BTreeSet::from([tag("10")])
+        );
+
+        session.list_mut(&ALICE, list("home")).undo();
+        assert_eq!(
+            item_order(&session),
+            [name("milch"), name("brot"), name("kaffee")]
+        );
     }
 
     #[test]

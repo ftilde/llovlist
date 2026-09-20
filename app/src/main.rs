@@ -10,7 +10,9 @@ use dioxus::prelude::*;
 use llovlist_core::{ListMut, TrimStr};
 
 use crate::notice::{Notice, Notices};
-use crate::state::{Settings, State, create_list, edit, remove_list, restore_deleted};
+use crate::state::{
+    Scope, Settings, State, create_list, edit, fill_from, remove_list, restore_deleted,
+};
 use crate::sync::start_sync;
 use crate::views::lists::ListsView;
 use crate::views::settings::SettingsView;
@@ -53,8 +55,18 @@ fn webview_config() -> webview::Config {
 #[derive(Clone, Copy, PartialEq)]
 enum View {
     Lists,
+    Templates,
     Settings,
     Shopping,
+}
+
+impl View {
+    fn scope(self) -> Scope {
+        match self {
+            Self::Templates => Scope::Templates,
+            _ => Scope::Lists,
+        }
+    }
 }
 
 fn enter_shop(mut settings: Signal<Settings>, mut view: Signal<View>, list: TrimStr) {
@@ -78,25 +90,37 @@ fn App() -> Element {
     let notice = use_context_provider(|| Signal::new(Notice::default()));
     let mut view = use_signal(|| View::Lists);
     let mut menu_open = use_signal(|| false);
-    let mut adding_list = use_signal(|| false);
-    let mut new_list = use_signal(String::new);
-    let mut current = use_signal(|| {
+    let mut adding = use_signal(|| false);
+    let mut filling = use_signal(|| false);
+    let mut new_name = use_signal(String::new);
+    let current_list = use_signal(|| {
         let remembered = settings.read().shopping.clone();
-        remembered.or_else(|| state.read().lists.names().first().cloned())
+        remembered.or_else(|| state.read().data.lists.names().first().cloned())
     });
+    let current_template = use_signal(|| None::<TrimStr>);
     // A relaunch mid-shop goes straight back in, still over the lock screen.
     use_hook(|| {
         // Bound first: the read guard of an `if let` scrutinee would outlive the write below.
         let remembered = settings.read().shopping.clone();
         if let Some(list) = remembered
-            && state.read().lists.has(&list)
+            && state.read().data.lists.has(&list)
         {
             enter_shop(settings, view, list);
         }
     });
 
-    let names = state.read().lists.names();
-    let restorable = state.read().lists.restorable().cloned();
+    let scope = view().scope();
+    let current = match scope {
+        Scope::Lists => current_list,
+        Scope::Templates => current_template,
+    };
+    let names = scope.of(&state.read().data).names();
+    let restorable = scope.of(&state.read().data).restorable().cloned();
+    let templates = state.read().data.templates.names();
+    let noun = match scope {
+        Scope::Lists => "list",
+        Scope::Templates => "template",
+    };
 
     // Falling back to the first name keeps a list selected when the current one is
     // deleted here or disappears in a merge.
@@ -105,32 +129,33 @@ fn App() -> Element {
         .or_else(|| names.first().cloned());
     let can_undo = selected
         .as_ref()
-        .is_some_and(|list| state.read().lists.can_undo(list));
+        .is_some_and(|list| scope.of(&state.read().data).can_undo(list));
     let can_redo = selected
         .as_ref()
-        .is_some_and(|list| state.read().lists.can_redo(list));
+        .is_some_and(|list| scope.of(&state.read().data).can_redo(list));
 
     let for_selected = |f: fn(&mut ListMut)| {
         let selected = selected.clone();
         move |_| {
             if let Some(list) = selected.clone() {
-                edit(state, list, f);
+                edit(state, scope, list, f);
             }
         }
     };
 
-    let mut add_list = move || {
-        if let Ok(list) = TrimStr::new(&new_list()) {
-            create_list(state, list.clone());
-            current.set(Some(list));
+    let mut add = move || {
+        if let Ok(name) = TrimStr::new(&new_name()) {
+            create_list(state, scope, name.clone());
+            let mut current = current;
+            current.set(Some(name));
         }
-        new_list.set(String::new());
-        adding_list.set(false);
+        new_name.set(String::new());
+        adding.set(false);
     };
 
     rsx! {
         document::Style { {CSS} }
-        div { class: "app",
+        div { class: if scope == Scope::Templates { "app templates" } else { "app" },
             header { class: "topbar",
                 if view() == View::Settings {
                     button { class: "icon", title: "back", onclick: move |_| view.set(View::Lists), "←" }
@@ -142,23 +167,30 @@ fn App() -> Element {
                     button { class: "icon", title: "redo", disabled: !can_redo, onclick: for_selected(|list| list.redo()), "↷" }
                     button { class: "icon", title: "sync", onclick: move |_| start_sync(state, settings, notice), "⟳" }
                 } else {
-                    h1 { "llovlist" }
+                    if view() == View::Templates {
+                        button { class: "icon", title: "back", onclick: move |_| view.set(View::Lists), "←" }
+                        h1 { "templates" }
+                    } else {
+                        h1 { "llovlist" }
+                    }
                     button { class: "icon", title: "undo", disabled: !can_undo, onclick: for_selected(|list| list.undo()), "↶" }
                     button { class: "icon", title: "redo", disabled: !can_redo, onclick: for_selected(|list| list.redo()), "↷" }
                     button { class: "icon", title: "sync", onclick: move |_| start_sync(state, settings, notice), "⟳" }
-                    button {
-                        class: "icon",
-                        title: "go shopping",
-                        disabled: selected.is_none(),
-                        onclick: {
-                            let selected = selected.clone();
-                            move |_| {
-                                if let Some(list) = selected.clone() {
-                                    enter_shop(settings, view, list);
+                    if view() == View::Lists {
+                        button {
+                            class: "icon",
+                            title: "go shopping",
+                            disabled: selected.is_none(),
+                            onclick: {
+                                let selected = selected.clone();
+                                move |_| {
+                                    if let Some(list) = selected.clone() {
+                                        enter_shop(settings, view, list);
+                                    }
                                 }
-                            }
-                        },
-                        "🛒"
+                            },
+                            "🛒"
+                        }
                     }
                     button {
                         class: if menu_open() { "icon active" } else { "icon" },
@@ -172,18 +204,26 @@ fn App() -> Element {
             if menu_open() {
                 div { class: "scrim", onclick: move |_| menu_open.set(false) }
                 nav { class: "menu",
-                    button { onclick: move |_| { menu_open.set(false); adding_list.set(true); }, "add list" }
+                    button { onclick: move |_| { menu_open.set(false); adding.set(true); }, "add {noun}" }
                     if let Some(list) = selected.clone() {
                         button {
-                            onclick: move |_| { menu_open.set(false); remove_list(state, &list); },
-                            "delete list “{list}”"
+                            onclick: move |_| { menu_open.set(false); remove_list(state, scope, &list); },
+                            "delete {noun} “{list}”"
                         }
                     }
                     if let Some(list) = restorable {
                         button {
-                            onclick: move |_| { menu_open.set(false); restore_deleted(state); },
-                            "restore list “{list}”"
+                            onclick: move |_| { menu_open.set(false); restore_deleted(state, scope); },
+                            "restore {noun} “{list}”"
                         }
+                    }
+                    if view() == View::Lists {
+                        button {
+                            disabled: selected.is_none(),
+                            onclick: move |_| { menu_open.set(false); filling.set(true); },
+                            "fill from template…"
+                        }
+                        button { onclick: move |_| { menu_open.set(false); view.set(View::Templates); }, "templates" }
                     }
                     button { onclick: move |_| { menu_open.set(false); view.set(View::Settings); }, "settings" }
                 }
@@ -192,33 +232,60 @@ fn App() -> Element {
             match (view(), selected.clone()) {
                 (View::Settings, _) => rsx! { SettingsView {} },
                 (View::Shopping, Some(list)) => rsx! { ShopView { list } },
-                (_, selected) => rsx! { ListsView { selected, current } },
+                (_, selected) => rsx! { ListsView { scope, selected, current } },
             }
 
             Notices {}
         }
 
-        if adding_list() {
-            div { class: "overlay", onclick: move |_| adding_list.set(false),
+        if adding() {
+            div { class: "overlay", onclick: move |_| adding.set(false),
                 div { class: "card", onclick: move |event| event.stop_propagation(),
-                    h2 { "new list" }
+                    h2 { "new {noun}" }
                     input {
                         placeholder: "name",
                         autofocus: true,
-                        value: "{new_list}",
+                        value: "{new_name}",
                         // Without this Android offers Next, which moves focus to the next
                         // field instead of sending Enter.
                         enterkeyhint: "done",
-                        oninput: move |event| new_list.set(event.value()),
+                        oninput: move |event| new_name.set(event.value()),
                         onkeydown: move |event: KeyboardEvent| match event.key() {
-                            Key::Enter => add_list(),
-                            Key::Escape => adding_list.set(false),
+                            Key::Enter => add(),
+                            Key::Escape => adding.set(false),
                             _ => {}
                         },
                     }
                     div { class: "actions",
-                        button { onclick: move |_| adding_list.set(false), "cancel" }
-                        button { class: "primary", onclick: move |_| add_list(), "add" }
+                        button { onclick: move |_| adding.set(false), "cancel" }
+                        button { class: "primary", onclick: move |_| add(), "add" }
+                    }
+                }
+            }
+        }
+
+        if let (true, Some(list)) = (filling(), selected.clone()) {
+            div { class: "overlay", onclick: move |_| filling.set(false),
+                div { class: "card", onclick: move |event| event.stop_propagation(),
+                    h2 { "fill “{list}” from" }
+                    if templates.is_empty() {
+                        p { class: "empty", "no templates yet" }
+                    }
+                    for template in templates.clone() {
+                        button {
+                            key: "{template}",
+                            onclick: {
+                                let list = list.clone();
+                                move |_| {
+                                    fill_from(state, list.clone(), &template);
+                                    filling.set(false);
+                                }
+                            },
+                            "{template}"
+                        }
+                    }
+                    div { class: "actions",
+                        button { onclick: move |_| filling.set(false), "cancel" }
                     }
                 }
             }

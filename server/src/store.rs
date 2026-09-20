@@ -3,41 +3,41 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use llovlist_core::Lists;
+use llovlist_core::Data;
 
 pub struct Store {
     path: PathBuf,
-    lists: Mutex<Lists>,
+    data: Mutex<Data>,
 }
 
 impl Store {
     pub fn open(dir: PathBuf) -> io::Result<Self> {
         fs::create_dir_all(&dir)?;
         let path = dir.join("lists.json");
-        let lists = match fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other)?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Lists::default(),
+        let data = match fs::read_to_string(&path) {
+            Ok(json) => Data::from_json(&json).map_err(io::Error::other)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Data::default(),
             Err(error) => return Err(error),
         };
         Ok(Self {
             path,
-            lists: Mutex::new(lists),
+            data: Mutex::new(data),
         })
     }
 
-    pub fn sync(&self, incoming: Lists) -> io::Result<Lists> {
-        let mut lists = self.lists.lock().expect("store lock poisoned");
-        lists.merge(incoming);
-        let merged = lists.clone();
+    pub fn sync(&self, incoming: Data) -> io::Result<Data> {
+        let mut data = self.data.lock().expect("store lock poisoned");
+        data.merge(incoming);
+        let merged = data.clone();
         self.write(&merged)?;
         Ok(merged)
     }
 
-    fn write(&self, lists: &Lists) -> io::Result<()> {
+    fn write(&self, data: &Data) -> io::Result<()> {
         let temporary = self.path.with_extension("json.new");
         fs::write(
             &temporary,
-            serde_json::to_vec(lists).map_err(io::Error::other)?,
+            serde_json::to_vec(data).map_err(io::Error::other)?,
         )?;
         fs::rename(temporary, &self.path)
     }
@@ -52,8 +52,9 @@ mod tests {
     #[test]
     fn lists_survive_a_restart() {
         let dir = tempfile::tempdir().unwrap();
-        let mut local = Lists::default();
+        let mut local = Data::default();
         local
+            .lists
             .list_mut(
                 &Session::new(DeviceId::new(1)),
                 TrimStr::new("home").unwrap(),
@@ -65,10 +66,11 @@ mod tests {
             .sync(local)
             .unwrap();
         let restarted = Store::open(dir.path().to_owned()).unwrap();
-        let merged = restarted.sync(Lists::default()).unwrap();
+        let merged = restarted.sync(Data::default()).unwrap();
 
         assert!(
             merged
+                .lists
                 .list(&TrimStr::new("home").unwrap())
                 .contains(&TrimStr::new("Milch").unwrap())
         );

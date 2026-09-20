@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use dioxus::prelude::*;
 use llovlist_core::{ItemSnapshot, TrimStr};
 
-use crate::state::{State, edit};
+use crate::state::{Scope, State, edit};
 
 /// Items ticked off in this shop, in tick order. Gone from the data already, kept here so
 /// they stay visible greyed out until the shop is over.
@@ -28,6 +28,7 @@ fn tick_off(state: Signal<State>, mut ticked: Signal<Ticked>, list: TrimStr, nam
     let snapshot = {
         let state = state.read();
         state
+            .data
             .lists
             .list(&list)
             .snapshot(state.session.device, &name)
@@ -35,7 +36,7 @@ fn tick_off(state: Signal<State>, mut ticked: Signal<Ticked>, list: TrimStr, nam
     if let Some(snapshot) = snapshot {
         ticked.write().tick(snapshot);
     }
-    edit(state, list, |list| list.remove_item(name));
+    edit(state, Scope::Lists, list, |list| list.remove_item(name));
 }
 
 fn put_back(state: Signal<State>, mut ticked: Signal<Ticked>, list: TrimStr, name: &TrimStr) {
@@ -47,7 +48,7 @@ fn put_back(state: Signal<State>, mut ticked: Signal<Ticked>, list: TrimStr, nam
         .cloned();
     if let Some(snapshot) = snapshot {
         ticked.write().untick(name);
-        edit(state, list, |list| list.restore(snapshot));
+        edit(state, Scope::Lists, list, |list| list.restore(snapshot));
     }
 }
 
@@ -56,7 +57,7 @@ pub fn ShopView(list: TrimStr) -> Element {
     let state: Signal<State> = use_context();
     // Owned by the view, so leaving the shop forgets the ticked items with it.
     let ticked = use_signal(Ticked::default);
-    let items = state.read().lists.list(&list).items();
+    let items = state.read().data.lists.list(&list).items();
     let done: Vec<ItemSnapshot> = ticked
         .read()
         .0

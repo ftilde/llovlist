@@ -11,7 +11,7 @@ use axum::extract::{FromRef, State};
 use axum::http::StatusCode;
 use axum::routing::post;
 use clap::Parser;
-use llovlist_core::Lists;
+use llovlist_core::Data;
 
 use auth::{Authenticated, Token, TokenHash};
 use store::Store;
@@ -78,8 +78,8 @@ fn router(state: AppState) -> Router {
 async fn sync(
     _: Authenticated,
     State(state): State<AppState>,
-    Json(incoming): Json<Lists>,
-) -> Result<Json<Lists>, StatusCode> {
+    Json(incoming): Json<Data>,
+) -> Result<Json<Data>, StatusCode> {
     state.store.sync(incoming).map(Json).map_err(|error| {
         eprintln!("sync failed: {error}");
         StatusCode::INTERNAL_SERVER_ERROR
@@ -105,31 +105,30 @@ mod tests {
         (router(state), token)
     }
 
-    fn lists_with(device: u64, list: &str, item: &str) -> Lists {
-        let mut lists = Lists::default();
-        lists
+    fn lists_with(device: u64, list: &str, item: &str) -> Data {
+        let mut data = Data::default();
+        data.lists
             .list_mut(
                 &Session::new(DeviceId::new(device)),
                 TrimStr::new(list).unwrap(),
             )
             .add_item(TrimStr::new(item).unwrap(), Position::End);
-        lists
+        data
     }
 
-    async fn post(app: &Router, bearer: &str, lists: &Lists) -> (StatusCode, Body) {
+    async fn post(app: &Router, bearer: &str, data: &Data) -> (StatusCode, Body) {
         let request = Request::post("/api/sync")
             .header("authorization", format!("Bearer {bearer}"))
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(lists).unwrap()))
+            .body(Body::from(serde_json::to_vec(data).unwrap()))
             .unwrap();
         let response = app.clone().oneshot(request).await.unwrap();
         (response.status(), response.into_body())
     }
 
     async fn names(body: Body) -> Vec<String> {
-        let lists: Lists =
-            serde_json::from_slice(&body.collect().await.unwrap().to_bytes()).unwrap();
-        lists
+        let data: Data = serde_json::from_slice(&body.collect().await.unwrap().to_bytes()).unwrap();
+        data.lists
             .names()
             .into_iter()
             .map(|name| name.to_string())
@@ -158,7 +157,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (app, _) = serve(&dir);
 
-        let (status, _) = post(&app, &"0".repeat(32), &Lists::default()).await;
+        let (status, _) = post(&app, &"0".repeat(32), &Data::default()).await;
 
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
