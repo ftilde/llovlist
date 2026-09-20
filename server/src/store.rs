@@ -45,7 +45,7 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
-    use llovlist_core::{DeviceId, Edit, ItemName, ListName};
+    use llovlist_core::{DeviceId, Position, Session, TrimStr};
 
     use super::*;
 
@@ -53,12 +53,12 @@ mod tests {
     fn lists_survive_a_restart() {
         let dir = tempfile::tempdir().unwrap();
         let mut local = Lists::default();
-        let list = ListName::new("home").unwrap();
-        let key = local.item_key_at_end(DeviceId::new(1), &list);
-        local.edit(
-            DeviceId::new(1),
-            Edit::add_item(list, ItemName::new("Milch").unwrap(), key),
-        );
+        local
+            .list_mut(
+                &Session::new(DeviceId::new(1)),
+                TrimStr::new("home").unwrap(),
+            )
+            .add_item(TrimStr::new("Milch").unwrap(), Position::End);
 
         Store::open(dir.path().to_owned())
             .unwrap()
@@ -67,9 +67,10 @@ mod tests {
         let restarted = Store::open(dir.path().to_owned()).unwrap();
         let merged = restarted.sync(Lists::default()).unwrap();
 
-        assert!(merged.contains(
-            &ListName::new("home").unwrap(),
-            &ItemName::new("Milch").unwrap()
-        ));
+        assert!(
+            merged
+                .list(&TrimStr::new("home").unwrap())
+                .contains(&TrimStr::new("Milch").unwrap())
+        );
     }
 }

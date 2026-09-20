@@ -4,7 +4,7 @@ mod sync;
 use std::collections::BTreeSet;
 
 use dioxus::prelude::*;
-use llovlist_core::{DeviceId, Edit, ItemName, ListName, Lists, Session, Tag};
+use llovlist_core::{DeviceId, ListMut, Lists, Position, Session, TrimStr};
 use serde::{Deserialize, Serialize};
 
 const CSS: &str = include_str!("../assets/main.css");
@@ -74,51 +74,67 @@ fn load_lists() -> Lists {
         .unwrap_or_default()
 }
 
-fn store(session: Signal<Session>) {
-    if let Ok(json) = serde_json::to_string(session.read().lists()) {
+/// The device's data plus who is editing it.
+struct State {
+    session: Session,
+    lists: Lists,
+}
+
+fn store(state: Signal<State>) {
+    if let Ok(json) = serde_json::to_string(&state.read().lists) {
         storage::save(LISTS_KEY, &json);
     }
 }
 
-fn apply(mut session: Signal<Session>, edit: Edit) {
-    session.write().edit(edit);
-    store(session);
+/// Runs `f` against `list` and persists the result.
+fn edit(mut state: Signal<State>, list: TrimStr, f: impl FnOnce(&mut ListMut)) {
+    {
+        let mut state = state.write();
+        let State { session, lists } = &mut *state;
+        f(&mut lists.list_mut(session, list));
+    }
+    store(state);
 }
 
-fn undo(mut session: Signal<Session>, list: &ListName) {
-    session.write().undo(list);
-    store(session);
+fn remove_list(mut state: Signal<State>, list: &TrimStr) {
+    {
+        let mut state = state.write();
+        let State { session, lists } = &mut *state;
+        lists.remove(session, list);
+    }
+    store(state);
 }
 
-fn restore_deleted(mut session: Signal<Session>) {
-    session.write().restore_deleted();
-    store(session);
+fn restore_deleted(mut state: Signal<State>) {
+    {
+        let mut state = state.write();
+        let State { session, lists } = &mut *state;
+        lists.restore_deleted(session);
+    }
+    store(state);
 }
 
-fn add_item(session: Signal<Session>, list: ListName, mut draft: Signal<String>) {
-    let name = ItemName::new(&draft.read()).ok();
-    if let Some(name) = name {
-        let key = session.read().item_key_at_end(&list);
-        apply(session, Edit::add_item(list, name, key));
+fn add_item(state: Signal<State>, list: TrimStr, mut draft: Signal<String>) {
+    let name = TrimStr::new(&draft.read());
+    if let Ok(name) = name {
+        edit(state, list, |list| list.add_item(name, Position::End));
         draft.set(String::new());
     }
 }
 
 fn create_list(
-    session: Signal<Session>,
-    mut current: Signal<Option<ListName>>,
+    mut state: Signal<State>,
+    mut current: Signal<Option<TrimStr>>,
     mut draft: Signal<String>,
 ) {
-    let list = ListName::new(&draft.read()).ok();
-    if let Some(list) = list {
-        let key = session.read().key_at_end();
-        apply(
-            session,
-            Edit::CreateList {
-                list: list.clone(),
-                key,
-            },
-        );
+    let list = TrimStr::new(&draft.read());
+    if let Ok(list) = list {
+        {
+            let mut state = state.write();
+            let State { session, lists } = &mut *state;
+            lists.create(session, list.clone(), Position::End);
+        }
+        store(state);
         current.set(Some(list));
         draft.set(String::new());
     }
@@ -264,64 +280,48 @@ fn Grip(
     }
 }
 
-fn move_list_to(session: Signal<Session>, list: &ListName, slot: usize) {
-    let key = session.read().key_for_slot(list, slot);
-    if let Some(key) = key {
-        apply(
-            session,
-            Edit::MoveList {
-                list: list.clone(),
-                key,
-            },
-        );
-    }
+fn move_list_to(state: Signal<State>, list: &TrimStr, slot: usize) {
+    edit(state, list.clone(), |list| list.move_to_slot(slot));
 }
 
-fn move_item_to(session: Signal<Session>, list: &ListName, name: &ItemName, slot: usize) {
-    let key = session.read().item_key_for_slot(list, name, slot);
-    if let Some(key) = key {
-        apply(
-            session,
-            Edit::MoveItem {
-                list: list.clone(),
-                name: name.clone(),
-                key,
-            },
-        );
-    }
+fn move_item_to(state: Signal<State>, list: &TrimStr, name: &TrimStr, slot: usize) {
+    let name = name.clone();
+    edit(state, list.clone(), |list| {
+        list.move_item_to_slot(name, slot)
+    });
 }
 
 fn add_tag(
-    on_edit: EventHandler<Edit>,
-    list: ListName,
-    name: ItemName,
+    state: Signal<State>,
+    list: TrimStr,
+    name: TrimStr,
     mut draft: Signal<String>,
     mut adding: Signal<bool>,
 ) {
-    let tag = Tag::new(&draft.read()).ok();
-    if let Some(tag) = tag {
-        on_edit.call(Edit::AddTag { list, name, tag });
+    let tag = TrimStr::new(&draft.read());
+    if let Ok(tag) = tag {
+        edit(state, list, |list| list.add_tag(name, tag));
     }
     draft.set(String::new());
     adding.set(false);
 }
 
 fn start_sync(
-    mut session: Signal<Session>,
+    mut state: Signal<State>,
     settings: Signal<Settings>,
     mut status: Signal<String>,
     mut error: Signal<String>,
 ) {
     let settings = settings.read().clone();
-    let local = session.read().lists().clone();
+    let local = state.read().lists.clone();
     spawn(async move {
         status.set("syncing…".to_owned());
         error.set(String::new());
         match sync::exchange(&settings.server, &settings.token, local).await {
             Ok(merged) => {
-                session.write().merge(merged);
-                store(session);
-                let count = session.read().lists().names().len();
+                state.write().lists.merge(merged);
+                store(state);
+                let count = state.read().lists.names().len();
                 let plural = if count == 1 { "" } else { "s" };
                 status.set(format!("synced, {count} list{plural}"));
             }
@@ -336,10 +336,13 @@ fn start_sync(
 #[component]
 fn App() -> Element {
     let settings = use_signal(Settings::load);
-    let session = use_signal(|| Session::new(settings.read().device, load_lists()));
+    let state = use_signal(|| State {
+        session: Session::new(settings.read().device),
+        lists: load_lists(),
+    });
     let status = use_signal(String::new);
     let mut error = use_signal(String::new);
-    let mut current = use_signal(|| session.read().lists().names().first().cloned());
+    let mut current = use_signal(|| state.read().lists.names().first().cloned());
     let mut draft = use_signal(String::new);
     let mut new_list = use_signal(String::new);
     let mut settings_open = use_signal(|| false);
@@ -348,8 +351,8 @@ fn App() -> Element {
 
     let list_line = list_drag().map(|drag| drag.line_before());
     let item_line = item_drag().map(|drag| drag.line_before());
-    let names = session.read().lists().names();
-    let can_restore = session.read().can_restore();
+    let names = state.read().lists.names();
+    let can_restore = state.read().lists.can_restore();
     let message = status();
     let failure = error();
 
@@ -360,11 +363,11 @@ fn App() -> Element {
         .or_else(|| names.first().cloned());
     let items = selected
         .as_ref()
-        .map(|list| session.read().lists().items(list))
+        .map(|list| state.read().lists.list(list).items())
         .unwrap_or_default();
     let can_undo = selected
         .as_ref()
-        .is_some_and(|list| session.read().can_undo(list));
+        .is_some_and(|list| state.read().lists.can_undo(list));
 
     rsx! {
         document::Style { {CSS} }
@@ -376,13 +379,13 @@ fn App() -> Element {
                     let selected = selected.clone();
                     move |_| {
                         if let Some(list) = selected.clone() {
-                            undo(session, &list);
+                            edit(state, list.clone(), |list| list.undo());
                         }
                     }
                 },
                 "undo"
             }
-            button { onclick: move |_| start_sync(session, settings, status, error), "sync" }
+            button { onclick: move |_| start_sync(state, settings, status, error), "sync" }
             button {
                 class: if settings_open() { "active" },
                 onclick: move |_| settings_open.toggle(),
@@ -406,7 +409,7 @@ fn App() -> Element {
                             drag: list_drag,
                             on_drop: {
                                 let name = name.clone();
-                                move |slot| move_list_to(session, &name, slot)
+                                move |slot| move_list_to(state, &name, slot)
                             },
                         }
                         button {
@@ -430,16 +433,16 @@ fn App() -> Element {
                         oninput: move |event| new_list.set(event.value()),
                         onkeydown: move |event: KeyboardEvent| {
                             if event.key() == Key::Enter {
-                                create_list(session, current, new_list);
+                                create_list(state, current, new_list);
                             }
                         },
                     }
-                    button { onclick: move |_| create_list(session, current, new_list), "+" }
+                    button { onclick: move |_| create_list(state, current, new_list), "+" }
                 }
                 if can_restore {
                     button {
                         class: "restore",
-                        onclick: move |_| restore_deleted(session),
+                        onclick: move |_| restore_deleted(state),
                         "restore list"
                     }
                 }
@@ -457,7 +460,7 @@ fn App() -> Element {
                                 let list = list.clone();
                                 move |event: KeyboardEvent| {
                                     if event.key() == Key::Enter {
-                                        add_item(session, list.clone(), draft);
+                                        add_item(state, list.clone(), draft);
                                     }
                                 }
                             },
@@ -465,7 +468,7 @@ fn App() -> Element {
                         button {
                             onclick: {
                                 let list = list.clone();
-                                move |_| add_item(session, list.clone(), draft)
+                                move |_| add_item(state, list.clone(), draft)
                             },
                             "+"
                         }
@@ -485,9 +488,8 @@ fn App() -> Element {
                                 list: list.clone(),
                                 name,
                                 tags,
-                                session,
+                                state,
                                 drag: item_drag,
-                                on_edit: move |edit| apply(session, edit),
                             }
                         }
                     }
@@ -496,7 +498,7 @@ fn App() -> Element {
                         class: "delete-list",
                         onclick: {
                             let list = list.clone();
-                            move |_| apply(session, Edit::RemoveList { list: list.clone() })
+                            move |_| remove_list(state, &list)
                         },
                         "delete list “{list}”"
                     }
@@ -523,7 +525,7 @@ fn App() -> Element {
         if let Some(dragged) = list_drag().and_then(|drag| names.get(drag.from).cloned()) {
             DragCatcher {
                 drag: list_drag,
-                on_drop: move |slot| move_list_to(session, &dragged, slot),
+                on_drop: move |slot| move_list_to(state, &dragged, slot),
             }
         }
 
@@ -533,7 +535,7 @@ fn App() -> Element {
         {
             DragCatcher {
                 drag: item_drag,
-                on_drop: move |slot| move_item_to(session, &list, &dragged.0, slot),
+                on_drop: move |slot| move_item_to(state, &list, &dragged.0, slot),
             }
         }
     }
@@ -544,12 +546,11 @@ fn ItemRow(
     index: usize,
     count: usize,
     line: Option<usize>,
-    list: ListName,
-    name: ItemName,
-    tags: BTreeSet<Tag>,
-    session: Signal<Session>,
+    list: TrimStr,
+    name: TrimStr,
+    tags: BTreeSet<TrimStr>,
+    state: Signal<State>,
     drag: Signal<Option<Drag>>,
-    on_edit: EventHandler<Edit>,
 ) -> Element {
     let mut adding = use_signal(|| false);
     let mut draft = use_signal(String::new);
@@ -567,7 +568,7 @@ fn ItemRow(
                 drag,
                 on_drop: {
                     let (list, name) = (list.clone(), name.clone());
-                    move |slot| move_item_to(session, &list, &name, slot)
+                    move |slot| move_item_to(state, &list, &name, slot)
                 },
             }
             button {
@@ -576,11 +577,8 @@ fn ItemRow(
                 onclick: {
                     let (list, name) = (list.clone(), name.clone());
                     move |_| {
-                        on_edit
-                            .call(Edit::RemoveItem {
-                                list: list.clone(),
-                                name: name.clone(),
-                            })
+                        let name = name.clone();
+                        edit(state, list.clone(), |list| list.remove_item(name))
                     }
                 },
                 "✓"
@@ -594,12 +592,8 @@ fn ItemRow(
                         onclick: {
                             let (list, name, tag) = (list.clone(), name.clone(), tag.clone());
                             move |_| {
-                                on_edit
-                                    .call(Edit::RemoveTag {
-                                        list: list.clone(),
-                                        name: name.clone(),
-                                        tag: tag.clone(),
-                                    })
+                                let (name, tag) = (name.clone(), tag.clone());
+                                edit(state, list.clone(), |list| list.remove_tag(name, tag))
                             }
                         },
                         "{tag} ×"
@@ -617,7 +611,7 @@ fn ItemRow(
                             let (list, name) = (list.clone(), name.clone());
                             move |event: KeyboardEvent| match event.key() {
                                 Key::Enter => {
-                                    add_tag(on_edit, list.clone(), name.clone(), draft, adding)
+                                    add_tag(state, list.clone(), name.clone(), draft, adding)
                                 }
                                 Key::Escape => adding.set(false),
                                 _ => {}

@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use llovlist_core::{DeviceId, Lists, Position, TrimStr};
+use llovlist_core::{DeviceId, Lists, Position, Session, TrimStr};
 use proptest::prelude::*;
 
 const REPLICAS: usize = 3;
@@ -42,24 +42,24 @@ fn before(order: &[TrimStr], at: usize) -> Position {
         .map_or(Position::End, |next| Position::Before(next.clone()))
 }
 
-fn perform(lists: &mut Lists, action: Action) {
+fn perform(lists: &mut Lists, session: &Session, action: Action) {
     match action {
-        Action::CreateList(list) => lists.create(list, Position::End),
-        Action::RemoveList(list) => lists.remove(&list),
+        Action::CreateList(list) => lists.create(session, list, Position::End),
+        Action::RemoveList(list) => lists.remove(session, &list),
         Action::MoveListBefore(list, at) => {
             let to = before(&lists.names(), at);
-            lists.list_mut(list).move_to(to);
+            lists.list_mut(session, list).move_to(to);
         }
         Action::AddItem(list, name) => {
-            lists.list_mut(list).add_item(name, Position::End);
+            lists.list_mut(session, list).add_item(name, Position::End);
         }
-        Action::RemoveItem(list, name) => lists.list_mut(list).remove_item(name),
+        Action::RemoveItem(list, name) => lists.list_mut(session, list).remove_item(name),
         Action::MoveItemBefore(list, name, at) => {
             let to = before(&lists.list(&list).item_names(), at);
-            lists.list_mut(list).move_item(name, to);
+            lists.list_mut(session, list).move_item(name, to);
         }
-        Action::AddTag(list, name, tag) => lists.list_mut(list).add_tag(name, tag),
-        Action::RemoveTag(list, name, tag) => lists.list_mut(list).remove_tag(name, tag),
+        Action::AddTag(list, name, tag) => lists.list_mut(session, list).add_tag(name, tag),
+        Action::RemoveTag(list, name, tag) => lists.list_mut(session, list).remove_tag(name, tag),
     }
 }
 
@@ -81,11 +81,10 @@ fn view(lists: &Lists) -> View {
 proptest! {
     #[test]
     fn replicas_converge(script in prop::collection::vec((0..REPLICAS, any_action()), 1..40)) {
-        let mut replicas: Vec<Lists> = (0..REPLICAS)
-            .map(|replica| Lists::new(DeviceId::new(replica as u64)))
-            .collect();
+        let mut replicas = vec![Lists::default(); REPLICAS];
         for (replica, action) in script {
-            perform(&mut replicas[replica], action);
+            let session = Session::new(DeviceId::new(replica as u64));
+            perform(&mut replicas[replica], &session, action);
         }
 
         // Two rounds: a change must also reach replicas that only observe it second-hand.

@@ -91,7 +91,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
-    use llovlist_core::{DeviceId, Edit, ItemName, ListName};
+    use llovlist_core::{DeviceId, Position, Session, TrimStr};
     use tower::ServiceExt;
 
     use super::*;
@@ -107,12 +107,12 @@ mod tests {
 
     fn lists_with(device: u64, list: &str, item: &str) -> Lists {
         let mut lists = Lists::default();
-        let list = ListName::new(list).unwrap();
-        let key = lists.item_key_at_end(DeviceId::new(device), &list);
-        lists.edit(
-            DeviceId::new(device),
-            Edit::add_item(list, ItemName::new(item).unwrap(), key),
-        );
+        lists
+            .list_mut(
+                &Session::new(DeviceId::new(device)),
+                TrimStr::new(list).unwrap(),
+            )
+            .add_item(TrimStr::new(item).unwrap(), Position::End);
         lists
     }
 

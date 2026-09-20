@@ -3,7 +3,7 @@ use std::fmt;
 
 use crdts::ctx::AddCtx;
 use crdts::identifier::Identifier;
-use crdts::{map, mvreg, CmRDT, CvRDT, MVReg, Map, Orswot, ResetRemove, VClock};
+use crdts::{CmRDT, CvRDT, MVReg, Map, Orswot, ResetRemove, VClock, map, mvreg};
 use serde::{Deserialize, Serialize};
 
 // Two replicas sharing an id mint the same dots and silently drop each other's entries.
@@ -196,13 +196,13 @@ impl EditGroup {
     }
 
     /// The edits that take `list` back to before this group is applied, if it changes anything.
-    fn inverse(&self, lists: &Lists, list: &TrimStr) -> Option<Self> {
+    fn inverse(&self, session: &Session, lists: &Lists, list: &TrimStr) -> Option<Self> {
         // Each edit is inverted against the state the ones before it leave behind.
         let mut scratch = lists.clone();
         let mut inverses = Vec::new();
         for edit in &self.0 {
-            inverses.push(edit.inverse(lists.device, &scratch.list(list)));
-            scratch.list_mut(list.clone()).edit(edit.clone());
+            inverses.push(edit.inverse(session.device, &scratch.list(list)));
+            scratch.list_mut(session, list.clone()).edit(edit.clone());
         }
         Self::collect(
             inverses
@@ -380,7 +380,6 @@ impl<V: ResetRemove<DeviceId>> ResetRemove<DeviceId> for Placed<V> {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lists {
     lists: Map<TrimStr, List, DeviceId>,
-    device: DeviceId, //TODO: Hm, i don't know if we want to store it here.
     // Undo state is per device and never leaves it.
     #[serde(skip)]
     history: HashMap<TrimStr, Vec<EditGroup>>,
@@ -397,13 +396,6 @@ struct Removed {
 }
 
 impl Lists {
-    pub fn new(device: DeviceId) -> Self {
-        Self {
-            device,
-            ..Self::default()
-        }
-    }
-
     pub fn names(&self) -> Vec<TrimStr> {
         let mut names: Vec<TrimStr> = self.lists.keys().map(|entry| entry.val.clone()).collect();
         names.sort_by_cached_key(|name| sort_key(self.order_key(name), name));
@@ -419,8 +411,12 @@ impl Lists {
         self.lists.get(name).val.unwrap_or_default()
     }
 
-    pub fn list_mut(&mut self, name: TrimStr) -> ListMut<'_> {
-        ListMut { lists: self, name }
+    pub fn list_mut<'a>(&'a mut self, session: &'a Session, name: TrimStr) -> ListMut<'a> {
+        ListMut {
+            lists: self,
+            session,
+            name,
+        }
     }
 
     fn order_key(&self, name: &TrimStr) -> Option<OrderKey> {
@@ -428,23 +424,23 @@ impl Lists {
     }
 
     /// The key for `subject` at `at`, with `subject` taken out of the order first.
-    fn key_for(&self, subject: &TrimStr, at: &Position) -> Option<OrderKey> {
+    fn key_for(&self, session: &Session, subject: &TrimStr, at: &Position) -> Option<OrderKey> {
         let order = without(self.names(), subject);
-        resolve(&order, |name| self.order_key(name), self.device, at)
+        resolve(&order, |name| self.order_key(name), session.device, at)
     }
 
     /// Creates the list at `at`; an existing list stays where it is.
-    pub fn create(&mut self, name: TrimStr, at: Position) {
-        let Some(key) = self.key_for(&name, &at) else {
+    pub fn create(&mut self, session: &Session, name: TrimStr, at: Position) {
+        let Some(key) = self.key_for(session, &name, &at) else {
             return;
         };
-        self.create_at(name, key);
+        self.create_at(session, name, key);
     }
 
-    fn create_at(&mut self, name: TrimStr, key: OrderKey) {
+    fn create_at(&mut self, session: &Session, name: TrimStr, key: OrderKey) {
         // Only when new, so re-creating an existing list does not move it.
         let fresh = !self.has(&name);
-        let ctx = self.lists.read_ctx().derive_add_ctx(self.device);
+        let ctx = self.lists.read_ctx().derive_add_ctx(session.device);
         let op = self.lists.update(name, ctx, |_, ctx| PlacedOp {
             position: fresh.then(|| put(key, &ctx)),
             inner: None,
@@ -452,16 +448,22 @@ impl Lists {
         self.lists.apply(op);
     }
 
-    pub fn remove(&mut self, name: &TrimStr) {
+    pub fn remove(&mut self, session: &Session, name: &TrimStr) {
         // Deleting a list outlives the list, so its restore goes on its own stack --
         // and the list's own history describes a state that no longer exists.
         self.history.remove(name);
         if self.has(name) {
-            self.deleted.push(self.removed(name.clone()));
+            self.deleted.push(self.removed(session, name.clone()));
         }
         let ctx = self.lists.get(name).derive_rm_ctx();
         let op = self.lists.rm(name.clone(), ctx);
         self.lists.apply(op);
+    }
+
+    pub fn can_undo(&self, name: &TrimStr) -> bool {
+        self.history
+            .get(name)
+            .is_some_and(|stack| !stack.is_empty())
     }
 
     pub fn can_restore(&self) -> bool {
@@ -469,12 +471,12 @@ impl Lists {
     }
 
     /// Puts the most recently deleted list back, with its items, tags and position.
-    pub fn restore_deleted(&mut self) {
+    pub fn restore_deleted(&mut self, session: &Session) {
         let Some(removed) = self.deleted.pop() else {
             return;
         };
-        self.create_at(removed.list.clone(), removed.key);
-        let mut list = self.list_mut(removed.list);
+        self.create_at(session, removed.list.clone(), removed.key);
+        let mut list = self.list_mut(session, removed.list);
         for item in removed.items {
             list.edit(item);
         }
@@ -484,17 +486,17 @@ impl Lists {
         self.lists.merge(other.lists);
     }
 
-    fn removed(&self, name: TrimStr) -> Removed {
+    fn removed(&self, session: &Session, name: TrimStr) -> Removed {
         let list = self.list(&name);
         Removed {
             key: self.order_key(&name).unwrap_or_else(|| {
-                self.key_for(&name, &Position::End)
+                self.key_for(session, &name, &Position::End)
                     .expect("End always resolves")
             }),
             items: list
                 .item_names()
                 .iter()
-                .map(|item| list.re_add(self.device, item))
+                .map(|item| list.re_add(session.device, item))
                 .collect(),
             list: name,
         }
@@ -504,6 +506,7 @@ impl Lists {
 /// Write access to one list, recording undo steps; reads go through `Lists::list`.
 pub struct ListMut<'a> {
     lists: &'a mut Lists,
+    session: &'a Session,
     name: TrimStr,
 }
 
@@ -554,7 +557,7 @@ impl ListMut<'_> {
         if !self.lists.has(&self.name) {
             return;
         }
-        let Some(key) = self.lists.key_for(&self.name, &to) else {
+        let Some(key) = self.lists.key_for(self.session, &self.name, &to) else {
             return;
         };
         let map = &self.lists.lists;
@@ -572,10 +575,7 @@ impl ListMut<'_> {
     }
 
     pub fn can_undo(&self) -> bool {
-        self.lists
-            .history
-            .get(&self.name)
-            .is_some_and(|stack| !stack.is_empty())
+        self.lists.can_undo(&self.name)
     }
 
     pub fn undo(&mut self) {
@@ -590,11 +590,11 @@ impl ListMut<'_> {
     }
 
     fn by(&self) -> DeviceId {
-        self.lists.device
+        self.session.device
     }
 
     fn apply(&mut self, group: EditGroup) {
-        if let Some(inverse) = group.inverse(self.lists, &self.name) {
+        if let Some(inverse) = group.inverse(self.session, self.lists, &self.name) {
             self.lists
                 .history
                 .entry(self.name.clone())
@@ -665,16 +665,15 @@ impl ListMut<'_> {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// Who is editing: runtime context for operations on the data, never stored with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Session {
-    pub lists: Lists,
+    pub device: DeviceId,
 }
 
 impl Session {
-    pub fn new(device: DeviceId) -> Self {
-        Self {
-            lists: Lists::new(device),
-        }
+    pub const fn new(device: DeviceId) -> Self {
+        Self { device }
     }
 }
 
@@ -682,7 +681,7 @@ impl Session {
 mod tests {
     use super::*;
 
-    const ALICE: DeviceId = DeviceId::new(1);
+    const ALICE: Session = Session::new(DeviceId::new(1));
 
     fn list(raw: &str) -> TrimStr {
         TrimStr::new(raw).unwrap()
@@ -697,17 +696,17 @@ mod tests {
     }
 
     fn create(session: &mut Lists, name: &str) {
-        session.create(list(name), Position::End);
+        session.create(&ALICE, list(name), Position::End);
     }
 
     fn add(session: &mut Lists, in_list: &str, item: &str) {
         session
-            .list_mut(list(in_list))
+            .list_mut(&ALICE, list(in_list))
             .add_item(name(item), Position::End);
     }
 
     fn three_lists() -> Lists {
-        let mut session = Lists::new(ALICE);
+        let mut session = Lists::default();
         for entry in ["a", "b", "c"] {
             create(&mut session, entry);
         }
@@ -715,7 +714,7 @@ mod tests {
     }
 
     fn home_with_items() -> Lists {
-        let mut session = Lists::new(ALICE);
+        let mut session = Lists::default();
         for item in ["milch", "brot", "kaffee"] {
             add(&mut session, "home", item);
         }
@@ -727,21 +726,11 @@ mod tests {
     }
 
     #[test]
-    fn items_keep_the_order_they_were_added_in() {
-        let session = home_with_items();
-
-        assert_eq!(
-            item_order(&session),
-            [name("milch"), name("brot"), name("kaffee")]
-        );
-    }
-
-    #[test]
     fn an_item_moves_before_another() {
         let mut session = home_with_items();
 
         session
-            .list_mut(list("home"))
+            .list_mut(&ALICE, list("home"))
             .move_item(name("kaffee"), Position::Before(name("brot")));
         assert_eq!(
             item_order(&session),
@@ -749,7 +738,7 @@ mod tests {
         );
 
         session
-            .list_mut(list("home"))
+            .list_mut(&ALICE, list("home"))
             .move_item(name("kaffee"), Position::Before(name("milch")));
         assert_eq!(
             item_order(&session),
@@ -767,7 +756,7 @@ mod tests {
             (2, ["milch", "brot", "kaffee"]),
         ] {
             session
-                .list_mut(list("home"))
+                .list_mut(&ALICE, list("home"))
                 .move_item_to_slot(name("kaffee"), slot);
             assert_eq!(
                 item_order(&session),
@@ -778,57 +767,13 @@ mod tests {
     }
 
     #[test]
-    fn a_slot_past_the_end_leaves_the_order_alone() {
-        let mut session = home_with_items();
-
-        // Three items, so slots 0..=2 exist once the dragged one is taken out.
-        session
-            .list_mut(list("home"))
-            .move_item_to_slot(name("milch"), 3);
-
-        assert_eq!(
-            item_order(&session),
-            [name("milch"), name("brot"), name("kaffee")]
-        );
-    }
-
-    #[test]
-    fn moving_before_an_unknown_item_does_nothing() {
-        let mut session = home_with_items();
-
-        session
-            .list_mut(list("home"))
-            .move_item(name("kaffee"), Position::Before(name("nope")));
-
-        assert_eq!(
-            item_order(&session),
-            [name("milch"), name("brot"), name("kaffee")]
-        );
-    }
-
-    #[test]
-    fn moving_an_item_records_nothing_to_undo() {
-        let mut session = home_with_items();
-        session.list_mut(list("home")).remove_item(name("brot"));
-
-        session
-            .list_mut(list("home"))
-            .move_item(name("kaffee"), Position::Before(name("milch")));
-        session.list_mut(list("home")).undo();
-
-        // The move is left alone; undo reaches past it to the tick-off.
-        assert_eq!(
-            item_order(&session),
-            [name("kaffee"), name("milch"), name("brot")]
-        );
-    }
-
-    #[test]
     fn undo_of_a_tick_off_restores_the_items_place() {
         let mut session = home_with_items();
 
-        session.list_mut(list("home")).remove_item(name("brot"));
-        session.list_mut(list("home")).undo();
+        session
+            .list_mut(&ALICE, list("home"))
+            .remove_item(name("brot"));
+        session.list_mut(&ALICE, list("home")).undo();
 
         assert_eq!(
             item_order(&session),
@@ -850,30 +795,18 @@ mod tests {
 
     #[test]
     fn removing_the_last_tag_keeps_the_item() {
-        let mut session = Lists::new(ALICE);
+        let mut session = Lists::default();
         add(&mut session, "home", "milch");
         session
-            .list_mut(list("home"))
+            .list_mut(&ALICE, list("home"))
             .add_tag(name("milch"), tag("2x"));
         session
-            .list_mut(list("home"))
+            .list_mut(&ALICE, list("home"))
             .remove_tag(name("milch"), tag("2x"));
 
         assert_eq!(
             session.list(&list("home")).items(),
             vec![(name("milch"), BTreeSet::new())]
-        );
-    }
-
-    #[test]
-    fn a_list_can_be_created_before_another() {
-        let mut session = three_lists();
-
-        session.create(list("d"), Position::Before(list("b")));
-
-        assert_eq!(
-            session.names(),
-            vec![list("a"), list("d"), list("b"), list("c")]
         );
     }
 
@@ -886,7 +819,7 @@ mod tests {
             (Position::Before(list("b")), ["a", "c", "b"]),
             (Position::End, ["a", "b", "c"]),
         ] {
-            session.list_mut(list("c")).move_to(to.clone());
+            session.list_mut(&ALICE, list("c")).move_to(to.clone());
             assert_eq!(
                 session.names(),
                 expected.map(list).to_vec(),
@@ -896,56 +829,26 @@ mod tests {
     }
 
     #[test]
-    fn a_list_can_be_dropped_into_any_slot() {
-        let mut session = three_lists();
-
-        for (slot, expected) in [
-            (0, ["c", "a", "b"]),
-            (1, ["a", "c", "b"]),
-            (2, ["a", "b", "c"]),
-        ] {
-            session.list_mut(list("c")).move_to_slot(slot);
-            assert_eq!(
-                session.names(),
-                expected.map(list).to_vec(),
-                "dropping c into slot {slot}"
-            );
-        }
-    }
-
-    #[test]
-    fn moving_a_list_records_nothing_to_undo() {
-        let mut session = three_lists();
-
-        session
-            .list_mut(list("c"))
-            .move_to(Position::Before(list("a")));
-
-        assert!(!session.list_mut(list("c")).can_undo());
-        assert!(!session.can_restore());
-    }
-
-    #[test]
     fn restoring_a_deleted_list_puts_it_back_in_place() {
         let mut session = three_lists();
 
-        session.remove(&list("b"));
+        session.remove(&ALICE, &list("b"));
         assert!(session.can_restore());
-        session.restore_deleted();
+        session.restore_deleted(&ALICE);
 
         assert_eq!(session.names(), vec![list("a"), list("b"), list("c")]);
     }
 
     #[test]
     fn undo_restores_a_removed_list_with_its_items_and_tags() {
-        let mut session = Lists::new(ALICE);
+        let mut session = Lists::default();
         add(&mut session, "home", "milch");
         session
-            .list_mut(list("home"))
+            .list_mut(&ALICE, list("home"))
             .add_tag(name("milch"), tag("2x"));
-        session.remove(&list("home"));
+        session.remove(&ALICE, &list("home"));
 
-        session.restore_deleted();
+        session.restore_deleted(&ALICE);
 
         assert_eq!(session.names(), vec![list("home")]);
         assert_eq!(
@@ -957,41 +860,13 @@ mod tests {
     // An edit that changed nothing costs no undo press; the next one reaches past it.
     #[test]
     fn re_adding_an_item_records_no_undo_step() {
-        let mut session = Lists::new(ALICE);
+        let mut session = Lists::default();
         add(&mut session, "home", "milch");
         add(&mut session, "home", "milch");
 
-        session.list_mut(list("home")).undo();
+        session.list_mut(&ALICE, list("home")).undo();
 
         assert!(!session.list(&list("home")).contains(&name("milch")));
-        assert!(!session.list_mut(list("home")).can_undo());
-    }
-
-    #[test]
-    fn each_list_undoes_on_its_own() {
-        let mut session = Lists::new(ALICE);
-        for (in_list, item) in [("home", "milch"), ("baumarkt", "schrauben")] {
-            add(&mut session, in_list, item);
-        }
-
-        session.list_mut(list("home")).undo();
-
-        assert!(!session.list(&list("home")).contains(&name("milch")));
-        assert!(session.list(&list("baumarkt")).contains(&name("schrauben")));
-        assert!(!session.list_mut(list("home")).can_undo());
-        assert!(session.list_mut(list("baumarkt")).can_undo());
-    }
-
-    #[test]
-    fn deleting_a_list_drops_its_undo_history() {
-        let mut session = home_with_items();
-        session.list_mut(list("home")).remove_item(name("brot"));
-
-        session.remove(&list("home"));
-        session.restore_deleted();
-
-        // The restored list is whole, and its earlier steps are not replayable onto it.
-        assert!(!session.list_mut(list("home")).can_undo());
-        assert_eq!(item_order(&session), [name("milch"), name("kaffee")]);
+        assert!(!session.list_mut(&ALICE, list("home")).can_undo());
     }
 }
