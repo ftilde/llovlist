@@ -145,16 +145,23 @@ fn create_list(
 struct Drag {
     /// Position of the dragged row in the displayed order.
     from: usize,
-    /// Midpoint of every row, in display order, as of pick-up.
+    /// Midpoint of every row along the drag axis, in display order, as of pick-up.
     midpoints: Vec<f64>,
     slot: usize,
+    horizontal: bool,
 }
 
 impl Drag {
-    fn aim(&mut self, y: f64) {
-        if let Some(slot) = slot_under(self.from, &self.midpoints, y) {
+    fn aim(&mut self, along: f64) {
+        if let Some(slot) = slot_under(self.from, &self.midpoints, along) {
             self.slot = slot;
         }
+    }
+
+    /// The pointer's coordinate along the drag axis.
+    fn along(&self, event: &PointerEvent) -> f64 {
+        let point = event.data().client_coordinates();
+        if self.horizontal { point.x } else { point.y }
     }
 
     /// Whether the rows have been measured, so a release means anything yet.
@@ -201,11 +208,16 @@ fn slot_under(from: usize, midpoints: &[f64], y: f64) -> Option<usize> {
 }
 
 /// Midpoints of the rows matching `selector`, measured in the webview.
-async fn row_midpoints(selector: &str) -> Vec<f64> {
+async fn row_midpoints(selector: &str, horizontal: bool) -> Vec<f64> {
+    let (start, size) = if horizontal {
+        ("left", "width")
+    } else {
+        ("top", "height")
+    };
     let script = format!(
         "dioxus.send(Array.from(document.querySelectorAll('{selector}')).map((row) => {{
             const box = row.getBoundingClientRect();
-            return box.top + box.height / 2;
+            return box.{start} + box.{size} / 2;
         }}));"
     );
     document::eval(&script).recv().await.unwrap_or_default()
@@ -213,7 +225,8 @@ async fn row_midpoints(selector: &str) -> Vec<f64> {
 
 fn aim_drag(mut drag: Signal<Option<Drag>>, event: &PointerEvent) {
     if let Some(mut active) = drag() {
-        active.aim(event.data().client_coordinates().y);
+        let along = active.along(event);
+        active.aim(along);
         drag.set(Some(active));
     }
 }
@@ -245,6 +258,7 @@ fn DragCatcher(drag: Signal<Option<Drag>>, on_drop: EventHandler<usize>) -> Elem
 fn Grip(
     index: usize,
     selector: String,
+    #[props(default)] horizontal: bool,
     drag: Signal<Option<Drag>>,
     on_drop: EventHandler<usize>,
 ) -> Element {
@@ -256,18 +270,20 @@ fn Grip(
             onpointerdown: move |event: PointerEvent| {
                 // Set synchronously, so a release that beats the measurement below still
                 // finds a drag to cancel rather than silently doing nothing.
-                drag.set(Some(Drag {
+                let fresh = Drag {
                     from: index,
                     midpoints: Vec::new(),
                     slot: index,
-                }));
-                let y = event.data().client_coordinates().y;
+                    horizontal,
+                };
+                let along = fresh.along(&event);
+                drag.set(Some(fresh));
                 let selector = selector.clone();
                 spawn(async move {
-                    let midpoints = row_midpoints(&selector).await;
+                    let midpoints = row_midpoints(&selector, horizontal).await;
                     if let Some(mut active) = drag() {
                         active.midpoints = midpoints;
-                        active.aim(y);
+                        active.aim(along);
                         drag.set(Some(active));
                     }
                 });
@@ -306,31 +322,50 @@ fn add_tag(
     adding.set(false);
 }
 
-fn start_sync(
-    mut state: Signal<State>,
-    settings: Signal<Settings>,
-    mut status: Signal<String>,
-    mut error: Signal<String>,
-) {
+fn start_sync(mut state: Signal<State>, settings: Signal<Settings>, notice: Signal<Notice>) {
     let settings = settings.read().clone();
     let local = state.read().lists.clone();
     spawn(async move {
-        status.set("syncing…".to_owned());
-        error.set(String::new());
         match sync::exchange(&settings.server, &settings.token, local).await {
             Ok(merged) => {
                 state.write().lists.merge(merged);
                 store(state);
                 let count = state.read().lists.names().len();
                 let plural = if count == 1 { "" } else { "s" };
-                status.set(format!("synced, {count} list{plural}"));
+                show(notice, format!("synced, {count} list{plural}"));
             }
             Err(reason) => {
-                status.set("sync failed".to_owned());
-                error.set(reason);
+                eprintln!("sync failed: {reason}");
+                show(notice, format!("sync failed: {reason}"));
             }
         }
     });
+}
+
+/// A short message at the bottom of the screen that goes away on its own.
+#[derive(Clone, PartialEq, Default)]
+struct Notice {
+    text: String,
+    // Distinguishes a newer notice from the one whose timer is running out.
+    serial: u64,
+}
+
+fn show(mut notice: Signal<Notice>, text: String) {
+    let serial = notice.read().serial + 1;
+    notice.set(Notice { text, serial });
+    spawn(async move {
+        // The webview's timer; no async runtime dependency needed for a delay.
+        let _ = document::eval("return new Promise((done) => setTimeout(done, 3000));").await;
+        if notice.read().serial == serial {
+            notice.set(Notice::default());
+        }
+    });
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum View {
+    Lists,
+    Settings,
 }
 
 #[component]
@@ -340,21 +375,21 @@ fn App() -> Element {
         session: Session::new(settings.read().device),
         lists: load_lists(),
     });
-    let status = use_signal(String::new);
-    let mut error = use_signal(String::new);
+    let notice = use_signal(Notice::default);
+    let mut view = use_signal(|| View::Lists);
+    let mut menu_open = use_signal(|| false);
+    let mut adding_list = use_signal(|| false);
     let mut current = use_signal(|| state.read().lists.names().first().cloned());
     let mut draft = use_signal(String::new);
     let mut new_list = use_signal(String::new);
-    let mut settings_open = use_signal(|| false);
     let list_drag = use_signal(|| None::<Drag>);
     let item_drag = use_signal(|| None::<Drag>);
 
     let list_line = list_drag().map(|drag| drag.line_before());
     let item_line = item_drag().map(|drag| drag.line_before());
     let names = state.read().lists.names();
-    let can_restore = state.read().lists.can_restore();
-    let message = status();
-    let failure = error();
+    let restorable = state.read().lists.restorable().cloned();
+    let message = notice.read().text.clone();
 
     // Falling back to the first name keeps a list selected when the current one is
     // deleted here or disappears in a merge.
@@ -368,89 +403,118 @@ fn App() -> Element {
     let can_undo = selected
         .as_ref()
         .is_some_and(|list| state.read().lists.can_undo(list));
+    let can_redo = selected
+        .as_ref()
+        .is_some_and(|list| state.read().lists.can_redo(list));
+
+    let for_selected = |f: fn(&mut ListMut)| {
+        let selected = selected.clone();
+        move |_| {
+            if let Some(list) = selected.clone() {
+                edit(state, list, f);
+            }
+        }
+    };
 
     rsx! {
         document::Style { {CSS} }
-        header {
-            h1 { "llovlist" }
-            button {
-                disabled: !can_undo,
-                onclick: {
-                    let selected = selected.clone();
-                    move |_| {
-                        if let Some(list) = selected.clone() {
-                            edit(state, list.clone(), |list| list.undo());
-                        }
-                    }
-                },
-                "undo"
-            }
-            button { onclick: move |_| start_sync(state, settings, status, error), "sync" }
-            button {
-                class: if settings_open() { "active" },
-                onclick: move |_| settings_open.toggle(),
-                "settings"
-            }
-        }
-
-        if settings_open() {
-            SettingsPanel { settings }
-        }
-
-        div { class: "body",
-            nav { class: "tabs",
-                for (index , name) in names.clone().into_iter().enumerate() {
-                    div {
-                        key: "{name}",
-                        class: row_class("tab-row", list_line, index, names.len()),
-                        Grip {
-                            index,
-                            selector: ".tabs > .tab-row",
-                            drag: list_drag,
-                            on_drop: {
-                                let name = name.clone();
-                                move |slot| move_list_to(state, &name, slot)
-                            },
-                        }
-                        button {
-                            class: if Some(&name) == selected.as_ref() { "tab active" } else { "tab" },
-                            onclick: {
-                                let name = name.clone();
-                                move |_| current.set(Some(name.clone()))
-                            },
-                            "{name}"
-                        }
-                    }
-                }
-                div { class: "add-list",
-                    input {
-                        class: "new-list",
-                        placeholder: "list",
-                        value: "{new_list}",
-                        // Without this Android offers Next, which moves focus to the next
-                        // field instead of sending Enter.
-                        enterkeyhint: "done",
-                        oninput: move |event| new_list.set(event.value()),
-                        onkeydown: move |event: KeyboardEvent| {
-                            if event.key() == Key::Enter {
-                                create_list(state, current, new_list);
-                            }
-                        },
-                    }
-                    button { onclick: move |_| create_list(state, current, new_list), "+" }
-                }
-                if can_restore {
+        div { class: "app",
+            header { class: "topbar",
+                if view() == View::Settings {
+                    button { class: "icon", title: "back", onclick: move |_| view.set(View::Lists), "←" }
+                    h1 { "settings" }
+                } else {
+                    h1 { "llovlist" }
+                    button { class: "icon", title: "undo", disabled: !can_undo, onclick: for_selected(|list| list.undo()), "↶" }
+                    button { class: "icon", title: "redo", disabled: !can_redo, onclick: for_selected(|list| list.redo()), "↷" }
+                    button { class: "icon", title: "sync", onclick: move |_| start_sync(state, settings, notice), "⟳" }
                     button {
-                        class: "restore",
-                        onclick: move |_| restore_deleted(state),
-                        "restore list"
+                        class: if menu_open() { "icon active" } else { "icon" },
+                        title: "menu",
+                        onclick: move |_| menu_open.toggle(),
+                        "☰"
                     }
                 }
             }
 
-            main {
+            if menu_open() {
+                div { class: "scrim", onclick: move |_| menu_open.set(false) }
+                nav { class: "menu",
+                    button { onclick: move |_| { menu_open.set(false); adding_list.set(true); }, "add list" }
+                    if let Some(list) = selected.clone() {
+                        button {
+                            onclick: move |_| { menu_open.set(false); remove_list(state, &list); },
+                            "delete list “{list}”"
+                        }
+                    }
+                    if let Some(list) = restorable {
+                        button {
+                            onclick: move |_| { menu_open.set(false); restore_deleted(state); },
+                            "restore list “{list}”"
+                        }
+                    }
+                    button { onclick: move |_| { menu_open.set(false); view.set(View::Settings); }, "settings" }
+                }
+            }
+
+            if view() == View::Settings {
+                main { class: "page", SettingsPanel { settings } }
+            } else {
+                nav { class: "tabs",
+                    for (index , name) in names.clone().into_iter().enumerate() {
+                        div {
+                            key: "{name}",
+                            class: row_class("tab-row", list_line, index, names.len()),
+                            Grip {
+                                index,
+                                selector: ".tabs > .tab-row",
+                                horizontal: true,
+                                drag: list_drag,
+                                on_drop: {
+                                    let name = name.clone();
+                                    move |slot| move_list_to(state, &name, slot)
+                                },
+                            }
+                            button {
+                                class: if Some(&name) == selected.as_ref() { "tab active" } else { "tab" },
+                                onclick: {
+                                    let name = name.clone();
+                                    move |_| current.set(Some(name.clone()))
+                                },
+                                "{name}"
+                            }
+                        }
+                    }
+                    if names.is_empty() {
+                        p { class: "empty", "no list yet — add one from the menu" }
+                    }
+                }
+
+                main { class: "page",
+                    if let Some(list) = selected.clone() {
+                        if items.is_empty() {
+                            p { class: "empty", "nothing to buy" }
+                        }
+                        ul { class: "items",
+                            for (index , (name , tags)) in items.clone().into_iter().enumerate() {
+                                ItemRow {
+                                    key: "{name}",
+                                    index,
+                                    count: items.len(),
+                                    line: item_line,
+                                    list: list.clone(),
+                                    name,
+                                    tags,
+                                    state,
+                                    drag: item_drag,
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if let Some(list) = selected.clone() {
-                    div { class: "add",
+                    footer { class: "add",
                         input {
                             placeholder: "add an item",
                             value: "{draft}",
@@ -466,6 +530,7 @@ fn App() -> Element {
                             },
                         }
                         button {
+                            class: "icon",
                             onclick: {
                                 let list = list.clone();
                                 move |_| add_item(state, list.clone(), draft)
@@ -473,51 +538,46 @@ fn App() -> Element {
                             "+"
                         }
                     }
-
-                    if items.is_empty() {
-                        p { class: "empty", "nothing to buy" }
-                    }
-
-                    ul { class: "items",
-                        for (index , (name , tags)) in items.clone().into_iter().enumerate() {
-                            ItemRow {
-                                key: "{name}",
-                                index,
-                                count: items.len(),
-                                line: item_line,
-                                list: list.clone(),
-                                name,
-                                tags,
-                                state,
-                                drag: item_drag,
-                            }
-                        }
-                    }
-
-                    button {
-                        class: "delete-list",
-                        onclick: {
-                            let list = list.clone();
-                            move |_| remove_list(state, &list)
-                        },
-                        "delete list “{list}”"
-                    }
-                } else {
-                    p { class: "empty", "no list yet — name one on the left" }
                 }
+            }
+
+            if !message.is_empty() {
+                p { class: "notice", "{message}" }
             }
         }
 
-        if !message.is_empty() {
-            p { class: "status", "{message}" }
-        }
-
-        if !failure.is_empty() {
-            div { class: "overlay",
-                div { class: "card",
-                    h2 { "sync failed" }
-                    p { "{failure}" }
-                    button { onclick: move |_| error.set(String::new()), "ok" }
+        if adding_list() {
+            div { class: "overlay", onclick: move |_| adding_list.set(false),
+                div { class: "card", onclick: move |event| event.stop_propagation(),
+                    h2 { "new list" }
+                    input {
+                        placeholder: "name",
+                        autofocus: true,
+                        value: "{new_list}",
+                        // Without this Android offers Next, which moves focus to the next
+                        // field instead of sending Enter.
+                        enterkeyhint: "done",
+                        oninput: move |event| new_list.set(event.value()),
+                        onkeydown: move |event: KeyboardEvent| match event.key() {
+                            Key::Enter => {
+                                create_list(state, current, new_list);
+                                adding_list.set(false);
+                            }
+                            Key::Escape => adding_list.set(false),
+                            _ => {}
+                        },
+                    }
+                    div { class: "actions",
+                        button { onclick: move |_| adding_list.set(false), "cancel" }
+                        button {
+                            class: "primary",
+                            onclick: move |_| {
+                                create_list(state, current, new_list);
+                                adding_list.set(false);
+                            },
+                            "add"
+                        }
+                    }
                 }
             }
         }
@@ -664,6 +724,7 @@ mod tests {
             from: 1,
             midpoints: Vec::new(),
             slot: 1,
+            horizontal: false,
         };
         drag.aim(5.0);
         assert_eq!(drag.slot, 1);
@@ -676,6 +737,7 @@ mod tests {
             from: 0,
             midpoints: MIDPOINTS.to_vec(),
             slot: 0,
+            horizontal: false,
         };
 
         drag.aim(5.0);

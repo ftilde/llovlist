@@ -479,8 +479,9 @@ impl Lists {
             .is_some_and(|history| !history.redo.is_empty())
     }
 
-    pub fn can_restore(&self) -> bool {
-        !self.deleted.is_empty()
+    /// The list `restore_deleted` would bring back.
+    pub fn restorable(&self) -> Option<&TrimStr> {
+        self.deleted.last().map(|removed| &removed.list)
     }
 
     /// Puts the most recently deleted list back, with its items, tags and position.
@@ -878,7 +879,7 @@ mod tests {
         let mut session = three_lists();
 
         session.remove(&ALICE, &list("b"));
-        assert!(session.can_restore());
+        assert_eq!(session.restorable(), Some(&list("b")));
         session.restore_deleted(&ALICE);
 
         assert_eq!(session.names(), vec![list("a"), list("b"), list("c")]);
