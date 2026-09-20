@@ -1,10 +1,11 @@
+mod platform;
 mod storage;
 mod sync;
 
 use std::collections::BTreeSet;
 
 use dioxus::prelude::*;
-use llovlist_core::{DeviceId, ListMut, Lists, Position, Session, TrimStr};
+use llovlist_core::{DeviceId, ItemSnapshot, ListMut, Lists, Position, Session, TrimStr};
 use serde::{Deserialize, Serialize};
 
 const CSS: &str = include_str!("../assets/main.css");
@@ -48,6 +49,9 @@ struct Settings {
     server: String,
     token: String,
     device: DeviceId,
+    /// The list being shopped, so a relaunch lands back in the shop without unlocking.
+    #[serde(default)]
+    shopping: Option<TrimStr>,
 }
 
 impl Settings {
@@ -58,6 +62,7 @@ impl Settings {
                 server: String::new(),
                 token: String::new(),
                 device: DeviceId::new(storage::random_u64()),
+                shopping: None,
             })
     }
 
@@ -366,6 +371,66 @@ fn show(mut notice: Signal<Notice>, text: String) {
 enum View {
     Lists,
     Settings,
+    Shopping,
+}
+
+/// Items ticked off in this shop, in tick order. Gone from the data already, kept here so
+/// they stay visible greyed out until the shop is over.
+#[derive(Clone, PartialEq, Default)]
+struct Ticked(Vec<ItemSnapshot>);
+
+impl Ticked {
+    fn tick(&mut self, snapshot: ItemSnapshot) {
+        self.untick(snapshot.name());
+        self.0.push(snapshot);
+    }
+
+    fn untick(&mut self, name: &TrimStr) {
+        self.0.retain(|ticked| ticked.name() != name);
+    }
+}
+
+/// Removes the item, remembering how to put it back.
+fn tick_off(state: Signal<State>, mut ticked: Signal<Ticked>, list: TrimStr, name: TrimStr) {
+    let snapshot = {
+        let state = state.read();
+        state
+            .lists
+            .list(&list)
+            .snapshot(state.session.device, &name)
+    };
+    if let Some(snapshot) = snapshot {
+        ticked.write().tick(snapshot);
+    }
+    edit(state, list, |list| list.remove_item(name));
+}
+
+fn put_back(state: Signal<State>, mut ticked: Signal<Ticked>, list: TrimStr, name: &TrimStr) {
+    let snapshot = ticked
+        .read()
+        .0
+        .iter()
+        .find(|ticked| ticked.name() == name)
+        .cloned();
+    if let Some(snapshot) = snapshot {
+        ticked.write().untick(name);
+        edit(state, list, |list| list.restore(snapshot));
+    }
+}
+
+fn enter_shop(mut settings: Signal<Settings>, mut view: Signal<View>, list: TrimStr) {
+    settings.write().shopping = Some(list);
+    settings.read().save();
+    view.set(View::Shopping);
+    platform::show_when_locked(true);
+}
+
+fn leave_shop(mut settings: Signal<Settings>, mut view: Signal<View>, mut ticked: Signal<Ticked>) {
+    settings.write().shopping = None;
+    settings.read().save();
+    ticked.set(Ticked::default());
+    view.set(View::Lists);
+    platform::show_when_locked(false);
 }
 
 #[component]
@@ -377,9 +442,23 @@ fn App() -> Element {
     });
     let notice = use_signal(Notice::default);
     let mut view = use_signal(|| View::Lists);
+    let ticked = use_signal(Ticked::default);
     let mut menu_open = use_signal(|| false);
     let mut adding_list = use_signal(|| false);
-    let mut current = use_signal(|| state.read().lists.names().first().cloned());
+    let mut current = use_signal(|| {
+        let remembered = settings.read().shopping.clone();
+        remembered.or_else(|| state.read().lists.names().first().cloned())
+    });
+    // A relaunch mid-shop goes straight back in, still over the lock screen.
+    use_hook(|| {
+        // Bound first: the read guard of an `if let` scrutinee would outlive the write below.
+        let remembered = settings.read().shopping.clone();
+        if let Some(list) = remembered
+            && state.read().lists.has(&list)
+        {
+            enter_shop(settings, view, list);
+        }
+    });
     let mut draft = use_signal(String::new);
     let mut new_list = use_signal(String::new);
     let list_drag = use_signal(|| None::<Drag>);
@@ -423,11 +502,31 @@ fn App() -> Element {
                 if view() == View::Settings {
                     button { class: "icon", title: "back", onclick: move |_| view.set(View::Lists), "←" }
                     h1 { "settings" }
+                } else if view() == View::Shopping {
+                    button { class: "icon", title: "back", onclick: move |_| leave_shop(settings, view, ticked), "←" }
+                    h1 { if let Some(list) = selected.clone() { "{list}" } }
+                    button { class: "icon", title: "undo", disabled: !can_undo, onclick: for_selected(|list| list.undo()), "↶" }
+                    button { class: "icon", title: "redo", disabled: !can_redo, onclick: for_selected(|list| list.redo()), "↷" }
+                    button { class: "icon", title: "sync", onclick: move |_| start_sync(state, settings, notice), "⟳" }
                 } else {
                     h1 { "llovlist" }
                     button { class: "icon", title: "undo", disabled: !can_undo, onclick: for_selected(|list| list.undo()), "↶" }
                     button { class: "icon", title: "redo", disabled: !can_redo, onclick: for_selected(|list| list.redo()), "↷" }
                     button { class: "icon", title: "sync", onclick: move |_| start_sync(state, settings, notice), "⟳" }
+                    button {
+                        class: "icon",
+                        title: "go shopping",
+                        disabled: selected.is_none(),
+                        onclick: {
+                            let selected = selected.clone();
+                            move |_| {
+                                if let Some(list) = selected.clone() {
+                                    enter_shop(settings, view, list);
+                                }
+                            }
+                        },
+                        "🛒"
+                    }
                     button {
                         class: if menu_open() { "icon active" } else { "icon" },
                         title: "menu",
@@ -459,6 +558,38 @@ fn App() -> Element {
 
             if view() == View::Settings {
                 main { class: "page", SettingsPanel { settings } }
+            } else if let (View::Shopping, Some(list)) = (view(), selected.clone()) {
+                main { class: "page",
+                    ul { class: "items",
+                        for (name , tags) in items.clone() {
+                            ShopRow {
+                                key: "{name}",
+                                name: name.clone(),
+                                tags,
+                                done: false,
+                                on_tick: {
+                                    let list = list.clone();
+                                    move |name: TrimStr| tick_off(state, ticked, list.clone(), name)
+                                },
+                            }
+                        }
+                        for snapshot in ticked.read().0.iter().filter(|ticked| !items.iter().any(|(live, _)| live == ticked.name())).cloned() {
+                            ShopRow {
+                                key: "done-{snapshot.name()}",
+                                name: snapshot.name().clone(),
+                                tags: snapshot.tags().clone(),
+                                done: true,
+                                on_tick: {
+                                    let list = list.clone();
+                                    move |name: TrimStr| put_back(state, ticked, list.clone(), &name)
+                                },
+                            }
+                        }
+                    }
+                    if items.is_empty() {
+                        p { class: "empty", "all done" }
+                    }
+                }
             } else {
                 nav { class: "tabs",
                     for (index , name) in names.clone().into_iter().enumerate() {
@@ -596,6 +727,35 @@ fn App() -> Element {
             DragCatcher {
                 drag: item_drag,
                 on_drop: move |slot| move_item_to(state, &list, &dragged.0, slot),
+            }
+        }
+    }
+}
+
+/// An item while shopping: tick it off, read its tags, nothing else.
+#[component]
+fn ShopRow(
+    name: TrimStr,
+    tags: BTreeSet<TrimStr>,
+    done: bool,
+    on_tick: EventHandler<TrimStr>,
+) -> Element {
+    rsx! {
+        li { class: if done { "item done" } else { "item" },
+            button {
+                class: "tick",
+                title: if done { "put it back" } else { "got it" },
+                onclick: {
+                    let name = name.clone();
+                    move |_| on_tick.call(name.clone())
+                },
+                if done { "✓" } else { "○" }
+            }
+            span { class: "name", "{name}" }
+            div { class: "tags",
+                for tag in tags.iter() {
+                    span { key: "{tag}", class: "tag", "{tag}" }
+                }
             }
         }
     }

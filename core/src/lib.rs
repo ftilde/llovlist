@@ -167,7 +167,7 @@ impl ItemEdit {
                     .collect()
             }
             Self::AddItem { name, .. } => vec![Self::RemoveItem { name: name.clone() }],
-            Self::RemoveItem { name } if list.contains(name) => vec![list.re_add(by, name)],
+            Self::RemoveItem { name } if list.contains(name) => vec![list.re_add(by, name).0],
             Self::AddTag { name, tag } if !list.tags(name).contains(tag) => {
                 vec![Self::RemoveTag {
                     name: name.clone(),
@@ -289,15 +289,39 @@ impl List {
         resolve(&order, |name| self.item_key(name), by, at)
     }
 
-    /// The edit that puts `name` back with its tags and place.
-    fn re_add(&self, by: DeviceId, name: &TrimStr) -> ItemEdit {
-        ItemEdit::AddItem {
+    /// What it takes to put `name` back as it is now: tags and place.
+    pub fn snapshot(&self, by: DeviceId, name: &TrimStr) -> Option<ItemSnapshot> {
+        self.contains(name).then(|| self.re_add(by, name))
+    }
+
+    fn re_add(&self, by: DeviceId, name: &TrimStr) -> ItemSnapshot {
+        ItemSnapshot(ItemEdit::AddItem {
             key: self.item_key(name).unwrap_or_else(|| {
                 self.key_for(by, name, &Position::End)
                     .expect("End always resolves")
             }),
             name: name.clone(),
             tags: self.tags(name),
+        })
+    }
+}
+
+/// An item as it was, for `ListMut::restore`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemSnapshot(ItemEdit);
+
+impl ItemSnapshot {
+    pub fn name(&self) -> &TrimStr {
+        match &self.0 {
+            ItemEdit::AddItem { name, .. } => name,
+            _ => unreachable!("a snapshot is always an AddItem"),
+        }
+    }
+
+    pub fn tags(&self) -> &BTreeSet<TrimStr> {
+        match &self.0 {
+            ItemEdit::AddItem { tags, .. } => tags,
+            _ => unreachable!("a snapshot is always an AddItem"),
         }
     }
 }
@@ -510,7 +534,7 @@ impl Lists {
             items: list
                 .item_names()
                 .iter()
-                .map(|item| list.re_add(session.device, item))
+                .map(|item| list.re_add(session.device, item).0)
                 .collect(),
             list: name,
         }
@@ -537,6 +561,11 @@ impl ListMut<'_> {
             }
             .into(),
         );
+    }
+
+    /// Puts a removed item back where it was, with the tags it had.
+    pub fn restore(&mut self, snapshot: ItemSnapshot) {
+        self.apply(snapshot.0.into());
     }
 
     pub fn move_item(&mut self, name: TrimStr, to: Position) {

@@ -264,6 +264,28 @@ input {
   font-size: 1.1rem;
 }
 
+.done {
+  color: var(--muted);
+}
+
+.done .name {
+  text-decoration: line-through;
+}
+
+.done .tick {
+  color: var(--muted);
+}
+
+span.tag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.9rem;
+  padding: 0 0.5rem;
+  border-radius: 999px;
+  background: var(--chip);
+  font-size: 0.8rem;
+}
+
 .name {
   flex: 1 1 6rem;
 }
