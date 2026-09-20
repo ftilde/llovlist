@@ -382,9 +382,16 @@ pub struct Lists {
     lists: Map<TrimStr, List, DeviceId>,
     // Undo state is per device and never leaves it.
     #[serde(skip)]
-    history: HashMap<TrimStr, Vec<EditGroup>>,
+    history: HashMap<TrimStr, History>,
     #[serde(skip)]
     deleted: Vec<Removed>,
+}
+
+/// Undo steps taken and not yet taken back; a fresh edit drops the redo side.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct History {
+    undo: Vec<EditGroup>,
+    redo: Vec<EditGroup>,
 }
 
 /// What it takes to put a removed list back: its place and its items.
@@ -463,7 +470,13 @@ impl Lists {
     pub fn can_undo(&self, name: &TrimStr) -> bool {
         self.history
             .get(name)
-            .is_some_and(|stack| !stack.is_empty())
+            .is_some_and(|history| !history.undo.is_empty())
+    }
+
+    pub fn can_redo(&self, name: &TrimStr) -> bool {
+        self.history
+            .get(name)
+            .is_some_and(|history| !history.redo.is_empty())
     }
 
     pub fn can_restore(&self) -> bool {
@@ -578,11 +591,30 @@ impl ListMut<'_> {
         self.lists.can_undo(&self.name)
     }
 
+    pub fn can_redo(&self) -> bool {
+        self.lists.can_redo(&self.name)
+    }
+
     pub fn undo(&mut self) {
-        let Some(inverse) = self.lists.history.get_mut(&self.name).and_then(Vec::pop) else {
+        let Some(step) = self.history().undo.pop() else {
             return;
         };
-        self.apply_raw(inverse);
+        let inverse = step.inverse(self.session, self.lists, &self.name);
+        self.history().redo.extend(inverse);
+        self.apply_raw(step);
+    }
+
+    pub fn redo(&mut self) {
+        let Some(step) = self.history().redo.pop() else {
+            return;
+        };
+        let inverse = step.inverse(self.session, self.lists, &self.name);
+        self.history().undo.extend(inverse);
+        self.apply_raw(step);
+    }
+
+    fn history(&mut self) -> &mut History {
+        self.lists.history.entry(self.name.clone()).or_default()
     }
 
     fn list(&self) -> List {
@@ -595,11 +627,9 @@ impl ListMut<'_> {
 
     fn apply(&mut self, group: EditGroup) {
         if let Some(inverse) = group.inverse(self.session, self.lists, &self.name) {
-            self.lists
-                .history
-                .entry(self.name.clone())
-                .or_default()
-                .push(inverse);
+            let history = self.history();
+            history.undo.push(inverse);
+            history.redo.clear();
         }
         self.apply_raw(group);
     }
@@ -779,6 +809,21 @@ mod tests {
             item_order(&session),
             [name("milch"), name("brot"), name("kaffee")]
         );
+    }
+
+    #[test]
+    fn redo_puts_an_undone_tick_off_back() {
+        let mut session = home_with_items();
+
+        session
+            .list_mut(&ALICE, list("home"))
+            .remove_item(name("brot"));
+        session.list_mut(&ALICE, list("home")).undo();
+        session.list_mut(&ALICE, list("home")).redo();
+
+        assert_eq!(item_order(&session), [name("milch"), name("kaffee")]);
+        assert!(!session.can_redo(&list("home")));
+        assert!(session.can_undo(&list("home")));
     }
 
     #[test]
