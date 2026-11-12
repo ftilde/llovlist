@@ -559,14 +559,41 @@ impl Usage {
     }
 }
 
+/// The format `Data` is stored and synced in.
+pub const DATA_VERSION: u32 = 1;
+
+/// Proof that the data it came with is in the format of `DATA_VERSION`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u32", into = "u32")]
+struct Version;
+
+impl From<Version> for u32 {
+    fn from(_: Version) -> Self {
+        DATA_VERSION
+    }
+}
+
+impl TryFrom<u32> for Version {
+    type Error = String;
+
+    fn try_from(version: u32) -> Result<Self, String> {
+        if version == DATA_VERSION {
+            Ok(Self)
+        } else {
+            Err(format!(
+                "data is in format {version}, this build reads format {DATA_VERSION}"
+            ))
+        }
+    }
+}
+
 /// Everything a device holds and syncs: the shopping lists, the templates to fill them
 /// from, and how often what was typed.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Data {
+    version: Version,
     pub lists: Lists,
-    #[serde(default)]
     pub templates: Lists,
-    #[serde(default)]
     pub usage: Usage,
 }
 
@@ -575,19 +602,6 @@ impl Data {
         self.lists.merge(other.lists);
         self.templates.merge(other.templates);
         self.usage.merge(other.usage);
-    }
-
-    /// Parses either the current shape or the pre-template one, a bare `Lists`.
-    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(json).or_else(|error| {
-            serde_json::from_str::<Lists>(json)
-                .map(|lists| Self {
-                    lists,
-                    templates: Lists::default(),
-                    usage: Usage::default(),
-                })
-                .map_err(|_| error)
-        })
     }
 }
 
@@ -1234,6 +1248,20 @@ mod tests {
             [tag("bio"), tag("bund")]
         );
         assert_eq!(usage.suggest_tags(&name("milch"), ""), [tag("bio")]);
+    }
+
+    #[test]
+    fn data_in_another_format_or_without_a_version_is_refused() {
+        let written = serde_json::to_value(Data::default()).unwrap();
+        assert_eq!(written["version"], DATA_VERSION);
+
+        let mut newer = written.clone();
+        newer["version"] = (DATA_VERSION + 1).into();
+        assert!(serde_json::from_value::<Data>(newer).is_err());
+
+        let mut unversioned = written;
+        unversioned.as_object_mut().unwrap().remove("version");
+        assert!(serde_json::from_value::<Data>(unversioned).is_err());
     }
 
     // An edit that changed nothing costs no undo press; the next one reaches past it.

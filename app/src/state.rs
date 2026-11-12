@@ -58,7 +58,7 @@ impl State {
         Self {
             session: Session::new(device),
             data: storage::load(LISTS_KEY)
-                .and_then(|json| Data::from_json(&json).ok())
+                .and_then(|json| serde_json::from_str(&json).ok())
                 .unwrap_or_default(),
             order: storage::load(ORDER_KEY)
                 .and_then(|json| serde_json::from_str(&json).ok())

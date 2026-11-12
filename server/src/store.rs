@@ -15,7 +15,7 @@ impl Store {
         fs::create_dir_all(&dir)?;
         let path = dir.join("lists.json");
         let data = match fs::read_to_string(&path) {
-            Ok(json) => Data::from_json(&json).map_err(io::Error::other)?,
+            Ok(json) => serde_json::from_str(&json).map_err(io::Error::other)?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => Data::default(),
             Err(error) => return Err(error),
         };
