@@ -100,6 +100,8 @@ pub fn ListsView(
                         button {
                             key: "{name}",
                             class: "tag",
+                            // Keeps the add field focused, so the next item can be typed.
+                            onmousedown: move |event| event.prevent_default(),
                             onclick: {
                                 let list = list.clone();
                                 move |_| {
