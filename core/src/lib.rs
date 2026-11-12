@@ -224,7 +224,6 @@ impl From<ItemEdit> for EditGroup {
 type Tags = Orswot<TrimStr, DeviceId>;
 pub type Item = Placed<Tags>;
 type Items = Map<TrimStr, Item, DeviceId>;
-pub type List = Placed<Items>;
 type ListsOp = map::Op<TrimStr, List, DeviceId>;
 
 /// A CRDT and its sort position as one map value.
@@ -246,9 +245,48 @@ fn sort_key(key: Option<OrderKey>, name: &TrimStr) -> (bool, Option<OrderKey>, T
     (key.is_none(), key, name.clone())
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct List {
+    items: Items,
+}
+
+impl CmRDT for List {
+    // `None` touches the list without changing it, which is how an empty one is created.
+    type Op = Option<<Items as CmRDT>::Op>;
+    type Validation = <Items as CmRDT>::Validation;
+
+    fn validate_op(&self, op: &Self::Op) -> Result<(), Self::Validation> {
+        op.as_ref().map_or(Ok(()), |op| self.items.validate_op(op))
+    }
+
+    fn apply(&mut self, op: Self::Op) {
+        if let Some(op) = op {
+            self.items.apply(op);
+        }
+    }
+}
+
+impl CvRDT for List {
+    type Validation = <Items as CvRDT>::Validation;
+
+    fn validate_merge(&self, other: &Self) -> Result<(), Self::Validation> {
+        self.items.validate_merge(&other.items)
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.items.merge(other.items);
+    }
+}
+
+impl ResetRemove<DeviceId> for List {
+    fn reset_remove(&mut self, clock: &VClock<DeviceId>) {
+        self.items.reset_remove(clock);
+    }
+}
+
 impl List {
     pub fn item(&self, name: &TrimStr) -> Option<Item> {
-        self.inner.get(name).val
+        self.items.get(name).val
     }
 
     pub fn contains(&self, name: &TrimStr) -> bool {
@@ -261,7 +299,7 @@ impl List {
 
     pub fn items(&self) -> Vec<(TrimStr, BTreeSet<TrimStr>)> {
         let mut items: Vec<(Option<OrderKey>, TrimStr, BTreeSet<TrimStr>)> = self
-            .inner
+            .items
             .iter()
             .map(|entry| {
                 let (name, item) = entry.val;
@@ -446,18 +484,17 @@ struct History {
     redo: Vec<EditGroup>,
 }
 
-/// What it takes to put a removed list back: its place and its items.
+/// What it takes to put a removed list back: its items.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Removed {
     list: TrimStr,
-    key: OrderKey,
     items: Vec<ItemEdit>,
 }
 
 impl Lists {
     pub fn names(&self) -> Vec<TrimStr> {
         let mut names: Vec<TrimStr> = self.lists.keys().map(|entry| entry.val.clone()).collect();
-        names.sort_by_cached_key(|name| sort_key(self.order_key(name), name));
+        names.sort();
         names
     }
 
@@ -478,32 +515,9 @@ impl Lists {
         }
     }
 
-    fn order_key(&self, name: &TrimStr) -> Option<OrderKey> {
-        self.list(name).key()
-    }
-
-    /// The key for `subject` at `at`, with `subject` taken out of the order first.
-    fn key_for(&self, session: &Session, subject: &TrimStr, at: &Position) -> Option<OrderKey> {
-        let order = without(self.names(), subject);
-        resolve(&order, |name| self.order_key(name), session.device, at)
-    }
-
-    /// Creates the list at `at`; an existing list stays where it is.
-    pub fn create(&mut self, session: &Session, name: TrimStr, at: Position) {
-        let Some(key) = self.key_for(session, &name, &at) else {
-            return;
-        };
-        self.create_at(session, name, key);
-    }
-
-    fn create_at(&mut self, session: &Session, name: TrimStr, key: OrderKey) {
-        // Only when new, so re-creating an existing list does not move it.
-        let fresh = !self.has(&name);
+    pub fn create(&mut self, session: &Session, name: TrimStr) {
         let ctx = self.lists.read_ctx().derive_add_ctx(session.device);
-        let op = self.lists.update(name, ctx, |_, ctx| PlacedOp {
-            position: fresh.then(|| put(key, &ctx)),
-            inner: None,
-        });
+        let op = self.lists.update(name, ctx, |_, _| None);
         self.lists.apply(op);
     }
 
@@ -512,7 +526,8 @@ impl Lists {
         // and the list's own history describes a state that no longer exists.
         self.history.remove(name);
         if self.has(name) {
-            self.deleted.push(self.removed(session, name.clone()));
+            self.deleted
+                .push(self.removed(session.device, name.clone()));
         }
         let ctx = self.lists.get(name).derive_rm_ctx();
         let op = self.lists.rm(name.clone(), ctx);
@@ -536,12 +551,12 @@ impl Lists {
         self.deleted.last().map(|removed| &removed.list)
     }
 
-    /// Puts the most recently deleted list back, with its items, tags and position.
+    /// Puts the most recently deleted list back, with its items and tags.
     pub fn restore_deleted(&mut self, session: &Session) {
         let Some(removed) = self.deleted.pop() else {
             return;
         };
-        self.create_at(session, removed.list.clone(), removed.key);
+        self.create(session, removed.list.clone());
         let mut list = self.list_mut(session, removed.list);
         for item in removed.items {
             list.edit(item);
@@ -552,17 +567,13 @@ impl Lists {
         self.lists.merge(other.lists);
     }
 
-    fn removed(&self, session: &Session, name: TrimStr) -> Removed {
+    fn removed(&self, by: DeviceId, name: TrimStr) -> Removed {
         let list = self.list(&name);
         Removed {
-            key: self.order_key(&name).unwrap_or_else(|| {
-                self.key_for(session, &name, &Position::End)
-                    .expect("End always resolves")
-            }),
             items: list
                 .item_names()
                 .iter()
-                .map(|item| list.re_add(session.device, item).0)
+                .map(|item| list.re_add(by, item).0)
                 .collect(),
             list: name,
         }
@@ -648,28 +659,6 @@ impl ListMut<'_> {
         self.apply(ItemEdit::RemoveTag { name, tag }.into());
     }
 
-    /// Moves the list itself.
-    pub fn move_to(&mut self, to: Position) {
-        if !self.lists.has(&self.name) {
-            return;
-        }
-        let Some(key) = self.lists.key_for(self.session, &self.name, &to) else {
-            return;
-        };
-        let map = &self.lists.lists;
-        let ctx = map.read_ctx().derive_add_ctx(self.by());
-        let op = map.update(self.name.clone(), ctx, |_, ctx| PlacedOp::place(key, &ctx));
-        self.lists.lists.apply(op);
-    }
-
-    /// Drops the list into `slot` of the order with it taken out.
-    pub fn move_to_slot(&mut self, slot: usize) {
-        let order = without(self.lists.names(), &self.name);
-        if let Some(to) = at_slot(&order, slot) {
-            self.move_to(to);
-        }
-    }
-
     pub fn can_undo(&self) -> bool {
         self.lists.can_undo(&self.name)
     }
@@ -742,9 +731,9 @@ impl ListMut<'_> {
                 self.update_item(name, ctx, |_, ctx| PlacedOp::place(key, &ctx))
             }
             ItemEdit::RemoveItem { name } => {
-                let rm_ctx = list.inner.get(&name).derive_rm_ctx();
+                let rm_ctx = list.items.get(&name).derive_rm_ctx();
                 map.update(self.name.clone(), ctx, |entry, _| {
-                    PlacedOp::inner(entry.inner.rm(name, rm_ctx))
+                    Some(entry.items.rm(name, rm_ctx))
                 })
             }
             ItemEdit::AddTag { name, tag } => self.update_item(name, ctx, |item, ctx| {
@@ -773,8 +762,51 @@ impl ListMut<'_> {
         self.lists
             .lists
             .update(self.name.clone(), ctx, |entry, ctx| {
-                PlacedOp::inner(entry.inner.update(name, ctx, f))
+                Some(entry.items.update(name, ctx, f))
             })
+    }
+}
+
+/// One device's order of the lists; never synced.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListOrder(Vec<TrimStr>);
+
+impl ListOrder {
+    /// The names of `lists` in this order, those it does not hold after the rest.
+    pub fn arrange(&self, lists: &Lists) -> Vec<TrimStr> {
+        let mut names = lists.names();
+        names.sort_by_key(|name| {
+            let held = self.0.iter().position(|held| held == name);
+            held.unwrap_or(self.0.len())
+        });
+        names
+    }
+
+    /// Drops `name` into `slot` of `lists` as arranged with `name` taken out.
+    pub fn move_to_slot(&mut self, lists: &Lists, name: &TrimStr, slot: usize) {
+        let others = without(self.arrange(lists), name);
+        if slot > others.len() {
+            return;
+        }
+        // A deleted list keeps its place for as long as it can be restored.
+        let restorable = |held: &TrimStr| lists.deleted.iter().any(|removed| &removed.list == held);
+        self.0
+            .retain(|held| held != name && (others.contains(held) || restorable(held)));
+        for other in &others {
+            if !self.0.contains(other) {
+                self.0.push(other.clone());
+            }
+        }
+        let index = others.get(slot).map_or(self.0.len(), |next| {
+            let held = self.0.iter().position(|held| held == next);
+            held.expect("every other name is held by now")
+        });
+        self.0.insert(index, name.clone());
+    }
+
+    pub fn move_to_end(&mut self, lists: &Lists, name: &TrimStr) {
+        let end = without(lists.names(), name).len();
+        self.move_to_slot(lists, name, end);
     }
 }
 
@@ -808,22 +840,10 @@ mod tests {
         TrimStr::new(raw).unwrap()
     }
 
-    fn create(session: &mut Lists, name: &str) {
-        session.create(&ALICE, list(name), Position::End);
-    }
-
     fn add(session: &mut Lists, in_list: &str, item: &str) {
         session
             .list_mut(&ALICE, list(in_list))
             .add_item(name(item), Position::End);
-    }
-
-    fn three_lists() -> Lists {
-        let mut session = Lists::default();
-        for entry in ["a", "b", "c"] {
-            create(&mut session, entry);
-        }
-        session
     }
 
     fn home_with_items() -> Lists {
@@ -975,33 +995,61 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_list_moves_before_another() {
-        let mut session = three_lists();
+    fn names(raw: &[&str]) -> Vec<TrimStr> {
+        raw.iter().map(|raw| list(raw)).collect()
+    }
 
-        for (to, expected) in [
-            (Position::Before(list("a")), ["c", "a", "b"]),
-            (Position::Before(list("b")), ["a", "c", "b"]),
-            (Position::End, ["a", "b", "c"]),
+    fn lists(raw: &[&str]) -> Lists {
+        let mut lists = Lists::default();
+        for name in names(raw) {
+            lists.create(&ALICE, name);
+        }
+        lists
+    }
+
+    #[test]
+    fn a_list_can_be_dropped_into_any_slot_among_lists_the_order_has_not_seen() {
+        let lists = lists(&["a", "b", "c"]);
+
+        for (slot, expected) in [
+            (0, ["c", "a", "b"]),
+            (1, ["a", "c", "b"]),
+            (2, ["a", "b", "c"]),
         ] {
-            session.list_mut(&ALICE, list("c")).move_to(to.clone());
+            let mut order = ListOrder::default();
+            order.move_to_slot(&lists, &list("c"), slot);
             assert_eq!(
-                session.names(),
-                expected.map(list).to_vec(),
-                "after moving c to {to:?}"
+                order.arrange(&lists),
+                names(&expected),
+                "dropping c into slot {slot}"
             );
         }
     }
 
     #[test]
-    fn restoring_a_deleted_list_puts_it_back_in_place() {
-        let mut session = three_lists();
+    fn a_restored_list_gets_its_place_back() {
+        let mut lists = lists(&["a", "b", "c"]);
+        let mut order = ListOrder::default();
+        order.move_to_slot(&lists, &list("c"), 0);
 
-        session.remove(&ALICE, &list("b"));
-        assert_eq!(session.restorable(), Some(&list("b")));
-        session.restore_deleted(&ALICE);
+        lists.remove(&ALICE, &list("c"));
+        order.move_to_slot(&lists, &list("b"), 0);
+        lists.restore_deleted(&ALICE);
 
-        assert_eq!(session.names(), vec![list("a"), list("b"), list("c")]);
+        assert_eq!(order.arrange(&lists), names(&["c", "b", "a"]));
+    }
+
+    #[test]
+    fn a_list_gone_beyond_restoring_loses_its_place() {
+        let mut order = ListOrder::default();
+        order.move_to_slot(&lists(&["a", "b", "c"]), &list("c"), 0);
+
+        order.move_to_slot(&lists(&["a", "b"]), &list("b"), 0);
+
+        assert_eq!(
+            order.arrange(&lists(&["a", "b", "c"])),
+            names(&["b", "a", "c"])
+        );
     }
 
     #[test]

@@ -22,7 +22,7 @@ pub fn ListsView(
 
     let list_line = list_drag().map(|drag| drag.line_before());
     let item_line = item_drag().map(|drag| drag.line_before());
-    let names = scope.of(&state.read().data).names();
+    let names = state.read().names(scope);
     let items = selected
         .as_ref()
         .map(|list| scope.of(&state.read().data).list(list).items())

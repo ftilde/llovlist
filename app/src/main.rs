@@ -95,7 +95,7 @@ fn App() -> Element {
     let mut new_name = use_signal(String::new);
     let current_list = use_signal(|| {
         let remembered = settings.read().shopping.clone();
-        remembered.or_else(|| state.read().data.lists.names().first().cloned())
+        remembered.or_else(|| state.read().names(Scope::Lists).first().cloned())
     });
     let current_template = use_signal(|| None::<TrimStr>);
     // A relaunch mid-shop goes straight back in, still over the lock screen.
@@ -114,9 +114,9 @@ fn App() -> Element {
         Scope::Lists => current_list,
         Scope::Templates => current_template,
     };
-    let names = scope.of(&state.read().data).names();
+    let names = state.read().names(scope);
     let restorable = scope.of(&state.read().data).restorable().cloned();
-    let templates = state.read().data.templates.names();
+    let templates = state.read().names(Scope::Templates);
     let noun = match scope {
         Scope::Lists => "list",
         Scope::Templates => "template",

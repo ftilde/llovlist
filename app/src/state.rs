@@ -1,12 +1,13 @@
 //! The device's data, who edits it, and how it is persisted.
 
 use dioxus::prelude::*;
-use llovlist_core::{Data, DeviceId, ListMut, Lists, Position, Session, TrimStr};
+use llovlist_core::{Data, DeviceId, ListMut, ListOrder, Lists, Session, TrimStr};
 use serde::{Deserialize, Serialize};
 
 use crate::storage;
 
 const LISTS_KEY: &str = "lists.json";
+const ORDER_KEY: &str = "order.json";
 const SETTINGS_KEY: &str = "settings.json";
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -38,10 +39,18 @@ impl Settings {
     }
 }
 
-/// The device's data plus who is editing it.
+/// The order this device shows the lists and the templates in.
+#[derive(Default, Serialize, Deserialize)]
+struct Order {
+    lists: ListOrder,
+    templates: ListOrder,
+}
+
+/// The device's data, how it is ordered here, and who is editing it.
 pub struct State {
     pub session: Session,
     pub data: Data,
+    order: Order,
 }
 
 impl State {
@@ -51,7 +60,15 @@ impl State {
             data: storage::load(LISTS_KEY)
                 .and_then(|json| Data::from_json(&json).ok())
                 .unwrap_or_default(),
+            order: storage::load(ORDER_KEY)
+                .and_then(|json| serde_json::from_str(&json).ok())
+                .unwrap_or_default(),
         }
+    }
+
+    /// The names in `scope`, in this device's order.
+    pub fn names(&self, scope: Scope) -> Vec<TrimStr> {
+        scope.order_of(&self.order).arrange(scope.of(&self.data))
     }
 }
 
@@ -76,6 +93,20 @@ impl Scope {
             Self::Templates => &mut data.templates,
         }
     }
+
+    fn order_of(self, order: &Order) -> &ListOrder {
+        match self {
+            Self::Lists => &order.lists,
+            Self::Templates => &order.templates,
+        }
+    }
+
+    fn order_of_mut(self, order: &mut Order) -> &mut ListOrder {
+        match self {
+            Self::Lists => &mut order.lists,
+            Self::Templates => &mut order.templates,
+        }
+    }
 }
 
 pub fn store(state: Signal<State>) {
@@ -88,7 +119,7 @@ pub fn store(state: Signal<State>) {
 pub fn change(mut state: Signal<State>, f: impl FnOnce(&Session, &mut Data)) {
     {
         let mut state = state.write();
-        let State { session, data } = &mut *state;
+        let State { session, data, .. } = &mut *state;
         f(session, data);
     }
     store(state);
@@ -101,10 +132,27 @@ pub fn edit(state: Signal<State>, scope: Scope, list: TrimStr, f: impl FnOnce(&m
     });
 }
 
+/// Runs `f` against the order of `scope` and persists the result.
+fn reorder(mut state: Signal<State>, scope: Scope, f: impl FnOnce(&mut ListOrder, &Lists)) {
+    {
+        let mut state = state.write();
+        let State { data, order, .. } = &mut *state;
+        f(scope.order_of_mut(order), scope.of(data));
+    }
+    if let Ok(json) = serde_json::to_string(&state.read().order) {
+        storage::save(ORDER_KEY, &json);
+    }
+}
+
 pub fn create_list(state: Signal<State>, scope: Scope, list: TrimStr) {
+    let fresh = !scope.of(&state.read().data).has(&list);
     change(state, |session, data| {
-        scope.of_mut(data).create(session, list, Position::End)
+        scope.of_mut(data).create(session, list.clone())
     });
+    // Only when new, so re-creating an existing list does not move it.
+    if fresh {
+        reorder(state, scope, |order, lists| order.move_to_end(lists, &list));
+    }
 }
 
 pub fn remove_list(state: Signal<State>, scope: Scope, list: &TrimStr) {
@@ -120,7 +168,9 @@ pub fn restore_deleted(state: Signal<State>, scope: Scope) {
 }
 
 pub fn move_list_to(state: Signal<State>, scope: Scope, list: &TrimStr, slot: usize) {
-    edit(state, scope, list.clone(), |list| list.move_to_slot(slot));
+    reorder(state, scope, |order, lists| {
+        order.move_to_slot(lists, list, slot)
+    });
 }
 
 pub fn move_item_to(

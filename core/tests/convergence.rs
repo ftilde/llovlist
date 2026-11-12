@@ -11,7 +11,6 @@ const REPLICAS: usize = 3;
 enum Action {
     CreateList(TrimStr),
     RemoveList(TrimStr),
-    MoveListBefore(TrimStr, usize),
     AddItem(TrimStr, TrimStr),
     RemoveItem(TrimStr, TrimStr),
     MoveItemBefore(TrimStr, TrimStr, usize),
@@ -26,7 +25,6 @@ fn any_action() -> impl Strategy<Value = Action> {
     prop_oneof![
         list.clone().prop_map(Action::CreateList),
         list.clone().prop_map(Action::RemoveList),
-        (list.clone(), 0usize..4).prop_map(|(l, at)| Action::MoveListBefore(l, at)),
         (list.clone(), name.clone()).prop_map(|(l, n)| Action::AddItem(l, n)),
         (list.clone(), name.clone()).prop_map(|(l, n)| Action::RemoveItem(l, n)),
         (list.clone(), name.clone(), 0usize..4)
@@ -44,12 +42,8 @@ fn before(order: &[TrimStr], at: usize) -> Position {
 
 fn perform(lists: &mut Lists, session: &Session, action: Action) {
     match action {
-        Action::CreateList(list) => lists.create(session, list, Position::End),
+        Action::CreateList(list) => lists.create(session, list),
         Action::RemoveList(list) => lists.remove(session, &list),
-        Action::MoveListBefore(list, at) => {
-            let to = before(&lists.names(), at);
-            lists.list_mut(session, list).move_to(to);
-        }
         Action::AddItem(list, name) => {
             lists.list_mut(session, list).add_item(name, Position::End);
         }
@@ -65,8 +59,8 @@ fn perform(lists: &mut Lists, session: &Session, action: Action) {
 
 type View = Vec<(TrimStr, Vec<(TrimStr, BTreeSet<TrimStr>)>)>;
 
-// names() and items() are both ordered, so comparing views compares the order every
-// replica shows, not just the contents.
+// items() is ordered, so comparing views compares the item order every replica shows,
+// not just the contents.
 fn view(lists: &Lists) -> View {
     lists
         .names()

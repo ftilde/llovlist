@@ -26,7 +26,7 @@ fn home() -> TrimStr {
 }
 
 fn create(lists: &mut Lists, session: &Session, name: &str) {
-    lists.create(session, list(name), Position::End);
+    lists.create(session, list(name));
 }
 
 fn add(lists: &mut Lists, session: &Session, in_list: &TrimStr, item: &str) {
@@ -250,41 +250,6 @@ fn a_stale_replica_does_not_resurrect_a_removed_item() {
     alice.merge(stale);
 
     assert!(!alice.list(&home()).contains(&name("Milch")));
-}
-
-#[test]
-fn concurrent_moves_of_one_list_agree_on_a_single_order() {
-    let mut alice = Lists::default();
-    for name in ["a", "b", "c"] {
-        create(&mut alice, &ALICE, name);
-    }
-    let mut bob = Lists::default();
-    bob.merge(alice.clone());
-
-    alice
-        .list_mut(&ALICE, list("c"))
-        .move_to(Position::Before(list("a")));
-    bob.list_mut(&BOB, list("c"))
-        .move_to(Position::Before(list("b")));
-
-    let mut merged_one = alice.clone();
-    merged_one.merge(bob.clone());
-    let mut merged_two = bob;
-    merged_two.merge(alice);
-
-    assert_eq!(merged_one.names(), merged_two.names());
-}
-
-#[test]
-fn a_list_created_without_a_position_sorts_last() {
-    let mut alice = Lists::default();
-    create(&mut alice, &ALICE, "a");
-    // Tagging an unknown item creates its list, and that path mints no key.
-    alice
-        .list_mut(&ALICE, list("ghost"))
-        .add_tag(name("Milch"), tag("2x"));
-
-    assert_eq!(alice.names(), vec![list("a"), list("ghost")]);
 }
 
 // Asserts the loss a duplicated DeviceId causes; not a behaviour to repair.
