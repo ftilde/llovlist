@@ -73,7 +73,7 @@ pub fn ListsView(
         main { class: "page",
             if let Some(list) = selected.clone() {
                 if items.is_empty() {
-                    p { class: "empty", "nothing to buy" }
+                    p { class: "empty", "no items yet" }
                 }
                 ul { class: "items",
                     for (index , (name , tags)) in items.clone().into_iter().enumerate() {
@@ -224,7 +224,7 @@ fn ItemRow(
             }
             button {
                 class: "tick",
-                title: "got it",
+                title: "tick off",
                 onclick: {
                     let (list, name) = (list.clone(), name.clone());
                     move |_| {
