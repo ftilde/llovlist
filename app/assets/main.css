@@ -217,6 +217,7 @@ input {
 
 .tag-suggestions {
   flex: 0 0 100%;
+  flex-direction: row-reverse;
 }
 
 .settings {
