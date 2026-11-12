@@ -258,6 +258,7 @@ fn ItemRow(
                         onmounted: move |mounted: MountedEvent| async move {
                             let _ = mounted.set_focus(true).await;
                         },
+                        onblur: move |_| adding.set(false),
                         value: "{draft}",
                         enterkeyhint: "done",
                         oninput: move |event| draft.set(event.value()),
@@ -282,6 +283,9 @@ fn ItemRow(
                         button {
                             key: "{tag}",
                             class: "add-tag",
+                            // Keeps the tag field focused: its blur would remove this chip
+                            // before the click arrives.
+                            onmousedown: move |event| event.prevent_default(),
                             onclick: {
                                 let (list, name) = (list.clone(), name.clone());
                                 move |_| {
