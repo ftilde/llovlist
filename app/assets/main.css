@@ -5,6 +5,7 @@
   --line: #dedcd5;
   --accent: #2f7d4f;
   --chip: #eceae3;
+  --chip-height: 1.9rem;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -196,16 +197,26 @@ input {
   border-top: 1px solid var(--line);
 }
 
+/* One row: a chip that does not fit wraps to a second row, which the height cuts off. */
 .suggestions {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.35rem;
-  flex: 0 0 auto;
-  padding: 0.5rem 0.75rem 0;
-  overflow-x: auto;
+  height: var(--chip-height);
+  overflow: hidden;
 }
 
-.suggestions .tag {
+.suggestions > * {
+  white-space: nowrap;
+}
+
+.item-suggestions {
   flex: 0 0 auto;
+  margin: 0.5rem 0.75rem 0;
+}
+
+.tag-suggestions {
+  flex: 0 0 100%;
 }
 
 .settings {
@@ -325,7 +336,7 @@ span.tag {
 
 .tag,
 .add-tag {
-  min-height: 1.9rem;
+  min-height: var(--chip-height);
   padding: 0 0.5rem;
   border-radius: 999px;
   background: var(--chip);
@@ -339,7 +350,7 @@ span.tag {
 
 .tag-input {
   width: 5rem;
-  min-height: 1.9rem;
+  min-height: var(--chip-height);
   font-size: 0.8rem;
 }
 

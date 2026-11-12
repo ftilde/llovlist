@@ -95,7 +95,7 @@ pub fn ListsView(
 
         if let Some(list) = selected.clone() {
             if !suggestions.is_empty() {
-                div { class: "suggestions",
+                div { class: "suggestions item-suggestions",
                     for name in suggestions {
                         button {
                             key: "{name}",
@@ -254,7 +254,10 @@ fn ItemRow(
                     input {
                         class: "tag-input",
                         placeholder: "2x",
-                        autofocus: true,
+                        // The webview honours `autofocus` once per page, not on every insertion.
+                        onmounted: move |mounted: MountedEvent| async move {
+                            let _ = mounted.set_focus(true).await;
+                        },
                         value: "{draft}",
                         enterkeyhint: "done",
                         oninput: move |event| draft.set(event.value()),
@@ -269,6 +272,12 @@ fn ItemRow(
                             }
                         },
                     }
+                } else {
+                    button { class: "add-tag", onclick: move |_| adding.set(true), "+" }
+                }
+            }
+            if !suggestions.is_empty() {
+                div { class: "suggestions tag-suggestions",
                     for tag in suggestions {
                         button {
                             key: "{tag}",
@@ -284,8 +293,6 @@ fn ItemRow(
                             "{tag}"
                         }
                     }
-                } else {
-                    button { class: "add-tag", onclick: move |_| adding.set(true), "+" }
                 }
             }
         }
