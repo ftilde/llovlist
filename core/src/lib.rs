@@ -1,4 +1,5 @@
-use std::collections::{BTreeSet, HashMap};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 
 use crdts::ctx::AddCtx;
@@ -439,19 +440,141 @@ impl<V: ResetRemove<DeviceId>> ResetRemove<DeviceId> for Placed<V> {
     }
 }
 
-/// Everything a device holds and syncs: the shopping lists and the templates to fill
-/// them from.
+/// A name without its case and spacing, so that its variations count as one.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+struct Group(String);
+
+impl Group {
+    fn of(name: &str) -> Self {
+        let words: Vec<String> = name.split_whitespace().map(str::to_lowercase).collect();
+        Self(words.join(" "))
+    }
+}
+
+/// How often each variation of each group was typed.
+type Groups = BTreeMap<Group, BTreeMap<TrimStr, u64>>;
+
+fn count(groups: &mut Groups, typed: &TrimStr) {
+    let variations = groups.entry(Group::of(typed.as_str())).or_default();
+    *variations.entry(typed.clone()).or_default() += 1;
+}
+
+fn merge_counts(into: &mut Groups, from: Groups) {
+    for (group, variations) in from {
+        for (variation, count) in variations {
+            let held = into
+                .entry(group.clone())
+                .or_default()
+                .entry(variation)
+                .or_default();
+            // Both sides counted the adds they share, so a sum would count those twice.
+            *held = (*held).max(count);
+        }
+    }
+}
+
+/// The most typed variation of every group starting with `prefix`, most typed group first.
+fn suggestions(groups: &Groups, prefix: &str) -> Vec<TrimStr> {
+    let prefix = Group::of(prefix);
+    let mut matching: Vec<(u64, &TrimStr)> = groups
+        .iter()
+        .filter(|(group, _)| group.0.starts_with(&prefix.0))
+        .filter_map(|(_, variations)| {
+            let (variation, _) = variations.iter().max_by_key(|(_, count)| **count)?;
+            Some((variations.values().sum(), variation))
+        })
+        .collect();
+    matching.sort_by_key(|(count, _)| Reverse(*count));
+    matching
+        .into_iter()
+        .map(|(_, variation)| variation.clone())
+        .collect()
+}
+
+/// How often each item name and tag was typed, to suggest them again.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Usage {
+    item_names_by_list: BTreeMap<TrimStr, Groups>,
+    tags_by_item: BTreeMap<Group, Groups>,
+}
+
+impl Usage {
+    pub fn record_item(&mut self, list: &TrimStr, name: &TrimStr) {
+        count(
+            self.item_names_by_list.entry(list.clone()).or_default(),
+            name,
+        );
+    }
+
+    pub fn record_tag(&mut self, item: &TrimStr, tag: &TrimStr) {
+        let item = Group::of(item.as_str());
+        count(self.tags_by_item.entry(item).or_default(), tag);
+    }
+
+    /// Item names typed into `list` that start with `prefix`.
+    pub fn suggest_items(&self, list: &TrimStr, prefix: &str) -> Vec<TrimStr> {
+        self.item_names_by_list
+            .get(list)
+            .map(|groups| suggestions(groups, prefix))
+            .unwrap_or_default()
+    }
+
+    /// Tags starting with `prefix`: those of `item`, then with a prefix those of other items.
+    pub fn suggest_tags(&self, item: &TrimStr, prefix: &str) -> Vec<TrimStr> {
+        let mut tags = self
+            .tags_by_item
+            .get(&Group::of(item.as_str()))
+            .map(|groups| suggestions(groups, prefix))
+            .unwrap_or_default();
+        if !prefix.trim().is_empty() {
+            let own: BTreeSet<Group> = tags.iter().map(|tag| Group::of(tag.as_str())).collect();
+            let of_any_item = suggestions(&self.tags_of_all_items(), prefix);
+            tags.extend(
+                of_any_item
+                    .into_iter()
+                    .filter(|tag| !own.contains(&Group::of(tag.as_str()))),
+            );
+        }
+        tags
+    }
+
+    fn tags_of_all_items(&self) -> Groups {
+        let mut all = Groups::new();
+        for (group, variations) in self.tags_by_item.values().flatten() {
+            for (variation, count) in variations {
+                let summed = all.entry(group.clone()).or_default();
+                *summed.entry(variation.clone()).or_default() += count;
+            }
+        }
+        all
+    }
+
+    pub fn merge(&mut self, other: Self) {
+        for (list, groups) in other.item_names_by_list {
+            merge_counts(self.item_names_by_list.entry(list).or_default(), groups);
+        }
+        for (item, groups) in other.tags_by_item {
+            merge_counts(self.tags_by_item.entry(item).or_default(), groups);
+        }
+    }
+}
+
+/// Everything a device holds and syncs: the shopping lists, the templates to fill them
+/// from, and how often what was typed.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Data {
     pub lists: Lists,
     #[serde(default)]
     pub templates: Lists,
+    #[serde(default)]
+    pub usage: Usage,
 }
 
 impl Data {
     pub fn merge(&mut self, other: Self) {
         self.lists.merge(other.lists);
         self.templates.merge(other.templates);
+        self.usage.merge(other.usage);
     }
 
     /// Parses either the current shape or the pre-template one, a bare `Lists`.
@@ -461,6 +584,7 @@ impl Data {
                 .map(|lists| Self {
                     lists,
                     templates: Lists::default(),
+                    usage: Usage::default(),
                 })
                 .map_err(|_| error)
         })
@@ -1068,6 +1192,48 @@ mod tests {
             session.list(&list("home")).tags(&name("milch")),
             BTreeSet::from([tag("2x")])
         );
+    }
+
+    #[test]
+    fn merging_usage_again_counts_nothing_twice() {
+        let mut phone = Usage::default();
+        phone.record_item(&list("home"), &name("Milch"));
+        phone.record_item(&list("home"), &name("Milch"));
+        phone.record_tag(&name("Milch"), &tag("bio"));
+
+        let mut server = phone.clone();
+        server.merge(phone.clone());
+
+        assert_eq!(server, phone);
+    }
+
+    #[test]
+    fn a_group_ranks_by_all_its_variations_and_shows_the_most_typed_one() {
+        let mut usage = Usage::default();
+        for typed in ["milch", "Milch", "Milch", "Mehl", "Mehl", "Brot"] {
+            usage.record_item(&list("home"), &name(typed));
+        }
+
+        assert_eq!(
+            usage.suggest_items(&list("home"), "m"),
+            [name("Milch"), name("Mehl")]
+        );
+        assert_eq!(usage.suggest_items(&list("baumarkt"), "m"), []);
+    }
+
+    #[test]
+    fn an_items_own_tags_come_before_those_of_other_items() {
+        let mut usage = Usage::default();
+        usage.record_tag(&name("Milch"), &tag("bio"));
+        for typed in ["Bio", "Bio", "bund"] {
+            usage.record_tag(&name("Brot"), &tag(typed));
+        }
+
+        assert_eq!(
+            usage.suggest_tags(&name("milch"), "b"),
+            [tag("bio"), tag("bund")]
+        );
+        assert_eq!(usage.suggest_tags(&name("milch"), ""), [tag("bio")]);
     }
 
     // An edit that changed nothing costs no undo press; the next one reaches past it.

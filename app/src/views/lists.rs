@@ -3,10 +3,10 @@
 use std::collections::BTreeSet;
 
 use dioxus::prelude::*;
-use llovlist_core::{Position, TrimStr};
+use llovlist_core::TrimStr;
 
 use crate::drag::{Drag, DragCatcher, Grip, row_class};
-use crate::state::{Scope, State, edit, move_item_to, move_list_to};
+use crate::state::{Scope, State, add_item, add_tag, edit, move_item_to, move_list_to};
 
 #[component]
 pub fn ListsView(
@@ -27,6 +27,17 @@ pub fn ListsView(
         .as_ref()
         .map(|list| scope.of(&state.read().data).list(list).items())
         .unwrap_or_default();
+    let suggestions: Vec<TrimStr> = match &selected {
+        Some(list) if !draft.read().trim().is_empty() => state
+            .read()
+            .data
+            .usage
+            .suggest_items(list, &draft.read())
+            .into_iter()
+            .filter(|name| !items.iter().any(|(listed, _)| listed == name))
+            .collect(),
+        _ => Vec::new(),
+    };
 
     rsx! {
         nav { class: "tabs",
@@ -83,6 +94,24 @@ pub fn ListsView(
         }
 
         if let Some(list) = selected.clone() {
+            if !suggestions.is_empty() {
+                div { class: "suggestions",
+                    for name in suggestions {
+                        button {
+                            key: "{name}",
+                            class: "tag",
+                            onclick: {
+                                let list = list.clone();
+                                move |_| {
+                                    add_item(state, scope, list.clone(), name.clone());
+                                    draft.set(String::new());
+                                }
+                            },
+                            "{name}"
+                        }
+                    }
+                }
+            }
             footer { class: "add",
                 input {
                     placeholder: "add an item",
@@ -93,7 +122,7 @@ pub fn ListsView(
                         let list = list.clone();
                         move |event: KeyboardEvent| {
                             if event.key() == Key::Enter {
-                                add_item(state, scope, list.clone(), draft);
+                                submit_item(state, scope, list.clone(), draft);
                             }
                         }
                     },
@@ -102,7 +131,7 @@ pub fn ListsView(
                     class: "icon",
                     onclick: {
                         let list = list.clone();
-                        move |_| add_item(state, scope, list.clone(), draft)
+                        move |_| submit_item(state, scope, list.clone(), draft)
                     },
                     "+"
                 }
@@ -128,17 +157,15 @@ pub fn ListsView(
     }
 }
 
-fn add_item(state: Signal<State>, scope: Scope, list: TrimStr, mut draft: Signal<String>) {
+fn submit_item(state: Signal<State>, scope: Scope, list: TrimStr, mut draft: Signal<String>) {
     let name = TrimStr::new(&draft.read());
     if let Ok(name) = name {
-        edit(state, scope, list, |list| {
-            list.add_item(name, Position::End)
-        });
+        add_item(state, scope, list, name);
         draft.set(String::new());
     }
 }
 
-fn add_tag(
+fn submit_tag(
     state: Signal<State>,
     scope: Scope,
     list: TrimStr,
@@ -148,7 +175,7 @@ fn add_tag(
 ) {
     let tag = TrimStr::new(&draft.read());
     if let Ok(tag) = tag {
-        edit(state, scope, list, |list| list.add_tag(name, tag));
+        add_tag(state, scope, list, name, tag);
     }
     draft.set(String::new());
     adding.set(false);
@@ -172,6 +199,16 @@ fn ItemRow(
         "item dragged"
     } else {
         "item"
+    };
+    let suggestions: Vec<TrimStr> = if adding() {
+        let usage = &state.read().data.usage;
+        let known = usage.suggest_tags(&name, &draft.read());
+        known
+            .into_iter()
+            .filter(|tag| !tags.contains(tag))
+            .collect()
+    } else {
+        Vec::new()
     };
 
     rsx! {
@@ -225,12 +262,27 @@ fn ItemRow(
                             let (list, name) = (list.clone(), name.clone());
                             move |event: KeyboardEvent| match event.key() {
                                 Key::Enter => {
-                                    add_tag(state, scope, list.clone(), name.clone(), draft, adding)
+                                    submit_tag(state, scope, list.clone(), name.clone(), draft, adding)
                                 }
                                 Key::Escape => adding.set(false),
                                 _ => {}
                             }
                         },
+                    }
+                    for tag in suggestions {
+                        button {
+                            key: "{tag}",
+                            class: "add-tag",
+                            onclick: {
+                                let (list, name) = (list.clone(), name.clone());
+                                move |_| {
+                                    add_tag(state, scope, list.clone(), name.clone(), tag.clone());
+                                    draft.set(String::new());
+                                    adding.set(false);
+                                }
+                            },
+                            "{tag}"
+                        }
                     }
                 } else {
                     button { class: "add-tag", onclick: move |_| adding.set(true), "+" }

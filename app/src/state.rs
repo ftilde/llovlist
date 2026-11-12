@@ -1,7 +1,7 @@
 //! The device's data, who edits it, and how it is persisted.
 
 use dioxus::prelude::*;
-use llovlist_core::{Data, DeviceId, ListMut, ListOrder, Lists, Session, TrimStr};
+use llovlist_core::{Data, DeviceId, ListMut, ListOrder, Lists, Position, Session, TrimStr};
 use serde::{Deserialize, Serialize};
 
 use crate::storage;
@@ -129,6 +129,32 @@ pub fn change(mut state: Signal<State>, f: impl FnOnce(&Session, &mut Data)) {
 pub fn edit(state: Signal<State>, scope: Scope, list: TrimStr, f: impl FnOnce(&mut ListMut)) {
     change(state, |session, data| {
         f(&mut scope.of_mut(data).list_mut(session, list))
+    });
+}
+
+/// Adds an item the user asked for by name, which counts towards suggesting it later.
+pub fn add_item(state: Signal<State>, scope: Scope, list: TrimStr, name: TrimStr) {
+    change(state, |session, data| {
+        if !scope.of(data).list(&list).contains(&name) {
+            data.usage.record_item(&list, &name);
+        }
+        scope
+            .of_mut(data)
+            .list_mut(session, list)
+            .add_item(name, Position::End);
+    });
+}
+
+/// Adds a tag the user asked for by name, which counts towards suggesting it later.
+pub fn add_tag(state: Signal<State>, scope: Scope, list: TrimStr, item: TrimStr, tag: TrimStr) {
+    change(state, |session, data| {
+        if !scope.of(data).list(&list).tags(&item).contains(&tag) {
+            data.usage.record_tag(&item, &tag);
+        }
+        scope
+            .of_mut(data)
+            .list_mut(session, list)
+            .add_tag(item, tag);
     });
 }
 
